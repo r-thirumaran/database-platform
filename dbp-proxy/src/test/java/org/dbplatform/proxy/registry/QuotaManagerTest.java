@@ -55,4 +55,29 @@ class QuotaManagerTest {
         q.update(List.of(), List.of());
         assertThat(q.admit(conn(registry, "orders-service", "orders-service", "sales", "sales"))).as("hot reload lifts the limit").isNull();
     }
+
+    @Test
+    void unknownApplicationCapAppliesPerDatasourceToConnectionsWithoutAnApplicationId() {
+        ConnectionRegistry registry = new ConnectionRegistry();
+        QuotaManager q = new QuotaManager(registry, 1);
+        assertThat(q.unknownAppMaxConnections()).isEqualTo(1);
+        q.update(List.of(), List.of());
+
+        LiveConnection anon1 = conn(registry, null, "unknown", "ds1", "sales");
+        LiveConnection anon2 = conn(registry, null, "unknown", "ds1", "sales");
+        assertThat(q.admit(anon1)).isNull();
+        assertThat(q.admit(anon2)).isEqualTo("unknown-application quota exceeded: sales 1/1 (application 'unknown' is not registered)");
+
+        // an undeclared service alias has a name but no id: it shares the unknown-application budget
+        LiveConnection alias = conn(registry, null, "rogue", "ds1", "sales");
+        alias.setIdentity(new ResolvedIdentity(null, "rogue", null, IdentitySource.SERVICE_ALIAS));
+        assertThat(q.admit(alias)).startsWith("unknown-application quota exceeded: sales 1/1 (application 'rogue'");
+
+        assertThat(q.admit(conn(registry, "a1", "orders", "ds1", "sales"))).as("registered applications are not capped").isNull();
+        assertThat(q.admit(conn(registry, null, "unknown", "ds2", "inventory"))).as("other datasource has its own budget").isNull();
+        q.release(anon1);
+        assertThat(q.admit(anon2)).isNull();
+
+        assertThat(new QuotaManager(registry).unknownAppMaxConnections()).as("default: unlimited").isZero();
+    }
 }

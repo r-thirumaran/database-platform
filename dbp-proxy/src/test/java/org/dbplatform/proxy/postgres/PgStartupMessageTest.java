@@ -60,6 +60,57 @@ class PgStartupMessageTest {
     }
 
     @Test
+    void withParamSplicesBytesAndNeverReencodesOtherValues() {
+        // user = "ren" + 0xE9 in LATIN1 (invalid as UTF-8), database to be rewritten, an option kept byte for byte
+        byte[] body = concat(
+                "user\0ren".getBytes(StandardCharsets.ISO_8859_1), new byte[] {(byte) 0xE9, 0},
+                "database\0sales.orders-service\0".getBytes(StandardCharsets.ISO_8859_1),
+                "options\0-c search_path=caf".getBytes(StandardCharsets.ISO_8859_1), new byte[] {(byte) 0xE9, 0},
+                new byte[] {0});
+        byte[] raw = new byte[8 + body.length];
+        PgStartupMessage.putI32(raw, 0, raw.length);
+        PgStartupMessage.putI32(raw, 4, PgStartupMessage.PROTOCOL_3_0);
+        System.arraycopy(body, 0, raw, 8, body.length);
+
+        PgStartupMessage m = PgStartupMessage.parse(raw);
+        assertThat(m.user()).as("display decoding replaces the invalid byte").isEqualTo("ren\uFFFD");
+        PgStartupMessage out = m.withParam("database", "postgres");
+
+        byte[] expected = concat(
+                "user\0ren".getBytes(StandardCharsets.ISO_8859_1), new byte[] {(byte) 0xE9, 0},
+                "database\0postgres\0".getBytes(StandardCharsets.ISO_8859_1),
+                "options\0-c search_path=caf".getBytes(StandardCharsets.ISO_8859_1), new byte[] {(byte) 0xE9, 0},
+                new byte[] {0});
+        assertThat(PgStartupMessage.i32(out.raw(), 0)).isEqualTo(out.raw().length);
+        assertThat(PgStartupMessage.i32(out.raw(), 4)).isEqualTo(PgStartupMessage.PROTOCOL_3_0);
+        assertThat(java.util.Arrays.copyOfRange(out.raw(), 8, out.raw().length)).isEqualTo(expected);
+        assertThat(out.database()).isEqualTo("postgres");
+        assertThat(out.paramKeys()).containsExactly("user", "database", "options");
+        assertThat(m.raw()).as("the original is untouched").isEqualTo(raw);
+
+        // a missing key is appended before the terminator, everything else still byte-identical
+        PgStartupMessage added = m.withParam("application_name", "orders");
+        byte[] addedBody = java.util.Arrays.copyOfRange(added.raw(), 8, added.raw().length);
+        assertThat(addedBody).startsWith(java.util.Arrays.copyOfRange(body, 0, body.length - 1));
+        assertThat(addedBody).endsWith("application_name\0orders\0\0".getBytes(StandardCharsets.ISO_8859_1));
+        assertThat(PgStartupMessage.parse(added.raw()).applicationName()).isEqualTo("orders");
+    }
+
+    private static byte[] concat(byte[]... parts) {
+        int n = 0;
+        for (byte[] p : parts) {
+            n += p.length;
+        }
+        byte[] out = new byte[n];
+        int pos = 0;
+        for (byte[] p : parts) {
+            System.arraycopy(p, 0, out, pos, p.length);
+            pos += p.length;
+        }
+        return out;
+    }
+
+    @Test
     void rejectsAbsurdLengths() {
         byte[] bad = new byte[8];
         PgStartupMessage.putI32(bad, 0, 1 << 20);

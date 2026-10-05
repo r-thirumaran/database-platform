@@ -115,6 +115,19 @@ class TnsDescriptorTest {
     }
 
     @Test
+    void controlCharactersInClientValuesAreNeutralised() {
+        String evil = "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=proxy)(PORT=1521))"
+                + "(CONNECT_DATA=(SERVICE_NAME=sales.ok\nINFO forged line)(CID=(PROGRAM=app\u0007\u001b[31m)(HOST=h\r\n)(USER=u\tx))))";
+        TnsConnectString cs = TnsConnectString.parse(evil);
+        assertThat(cs.requestedService()).isEqualTo("sales.ok?INFO forged line");
+        assertThat(cs.program()).isEqualTo("app??[31m");
+        assertThat(cs.host()).as("surrounding whitespace is stripped first").isEqualTo("h");
+        assertThat(cs.user()).isEqualTo("u?x");
+        assertThat(cs.rewrite("FREEPDB1", "oracle", 1521)).as("the wire string itself is not altered").contains("(PROGRAM=app\u0007\u001b[31m)");
+        assertThat(TnsConnectString.display("caf\u00C3\u00A9")).as("UTF-8 display decoding still works").isEqualTo("caf\u00E9");
+    }
+
+    @Test
     void pingAndNonDescriptorStringsAreTolerated() {
         TnsConnectString ping = TnsConnectString.parse("(DESCRIPTION=(CONNECT_DATA=(COMMAND=ping))(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1521)))");
         assertThat(ping.isPing()).isTrue();

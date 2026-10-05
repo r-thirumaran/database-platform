@@ -41,14 +41,21 @@ class OracleHandshakeTest {
         }
     }
 
+    private static ProxySettings defaultSettings() {
+        return ProxySettings.defaults().withListenAddress("127.0.0.1").withTimeouts(0, 2000, 5000);
+    }
+
     private int startProxy(String backendHost, int backendPort, int quota) throws IOException {
+        return startProxy(backendHost, backendPort, quota, defaultSettings());
+    }
+
+    private int startProxy(String backendHost, int backendPort, int quota, ProxySettings settings) throws IOException {
         RouteConfig sales = new RouteConfig("sales", null, null, "db-1", backendHost, backendPort, "FREEPDB1", true);
         ListenerConfig l = new ListenerConfig("oracle-main", Engine.ORACLE, "127.0.0.1", 0, null, List.of(sales), null);
         ApplicationConfig orders = new ApplicationConfig("app-1", "orders-service", "team-1",
                 new IdentityRules(null, null, null, List.of("orders-service"), null));
         ProxyConfigDocument cfg = new ProxyConfigDocument(1, "proxy-test", List.of(l), List.of(orders),
                 quota > 0 ? List.of(new QuotaConfig("app-1", null, "sales", null, quota)) : List.of(), List.of());
-        ProxySettings settings = ProxySettings.defaults().withListenAddress("127.0.0.1").withTimeouts(0, 2000, 5000);
         app = ProxyApp.startEmbedded(settings, cfg, events, false);
         return app.server().listener("oracle-main").boundPort();
     }
@@ -340,6 +347,156 @@ class OracleHandshakeTest {
                     assertThat(TnsRefusePacket.errorCode(reply)).as("old route is gone").isEqualTo(12514);
                 }
             }
+        }
+    }
+
+    @Test
+    void stalledClientIsDroppedAtTheHandshakeDeadlineAndItsSlotReleased() throws Exception {
+        try (FakeTnsServer backend = new FakeTnsServer(FakeTnsServer::acceptAndEcho)) {
+            int port = startProxy("127.0.0.1", backend.port(), 0, defaultSettings().withTimeouts(0, 2000, 700));
+            long t0 = System.nanoTime();
+            try (Socket s = client(port)) {
+                s.getOutputStream().write(0); // one byte of a TNS header, then silence (slowloris)
+                s.getOutputStream().flush();
+                int r;
+                try {
+                    r = s.getInputStream().read();
+                } catch (IOException reset) {
+                    r = -1; // the proxy may reset instead of FIN-closing
+                }
+                long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+                assertThat(r).as("proxy closed the stalled connection").isEqualTo(-1);
+                assertThat(elapsedMs).as("dropped at the deadline, not before").isBetween(500L, 4000L);
+            }
+            Await.until(3000, () -> app.server().listener("oracle-main").inFlight() == 0, "in-flight slot released");
+            assertThat(app.registry().size()).isZero();
+            assertThat(events.ofType("OPEN")).isEmpty();
+            assertThat(events.ofType("CLOSE")).as("never opened, so no CLOSE").isEmpty();
+            assertThat(app.metrics().scrape()).as("a timeout is not a protocol error").doesNotContain("reason=\"protocol\"");
+        }
+    }
+
+    @Test
+    void malformedBackendPacketsAreBackendFailuresNotClientProtocolErrors() throws Exception {
+        // REDIRECT without a PORT in its address
+        try (FakeTnsServer listener = new FakeTnsServer(s -> {
+            OracleConnectionHandler.readConnectRequest(s.in);
+            s.write(TnsRedirectPacket.build("(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1))", null));
+        })) {
+            int port = startProxy("127.0.0.1", listener.port(), 0);
+            try (Socket s = client(port)) {
+                TnsPacket reply = send(s, TnsTestPackets.connect(318, CLIENT));
+                assertThat(reply.type()).isEqualTo(TnsPacket.TYPE_REFUSE);
+                assertThat(TnsRefusePacket.errorCode(reply)).isEqualTo(12541);
+            }
+            Await.until(3000, () -> !events.ofType("BACKEND_FAILED").isEmpty(), "BACKEND_FAILED event");
+            assertThat(events.ofType("BACKEND_FAILED").get(0).reason()).contains("malformed packet").contains("REDIRECT address without PORT");
+            String metrics = app.metrics().scrape();
+            assertThat(metrics).contains("dbp_proxy_connections_failed_total{listener=\"oracle-main\"} 1.0")
+                    .doesNotContain("reason=\"protocol\"");
+        }
+        app.close();
+        events.clear();
+        // packet with an impossible length from the backend
+        try (FakeTnsServer listener = new FakeTnsServer(s -> {
+            OracleConnectionHandler.readConnectRequest(s.in);
+            s.write(new byte[] {0, 4, 0, 0, TnsPacket.TYPE_REDIRECT, 0, 0, 0});
+        })) {
+            int port = startProxy("127.0.0.1", listener.port(), 0);
+            try (Socket s = client(port)) {
+                TnsPacket reply = send(s, TnsTestPackets.connect(318, CLIENT));
+                assertThat(TnsRefusePacket.errorCode(reply)).isEqualTo(12541);
+            }
+            Await.until(3000, () -> !events.ofType("BACKEND_FAILED").isEmpty(), "BACKEND_FAILED event");
+            assertThat(events.ofType("BACKEND_FAILED").get(0).reason()).contains("Invalid TNS packet length 4");
+            assertThat(events.ofType("REFUSED")).isEmpty();
+            assertThat(app.registry().size()).isZero();
+        }
+    }
+
+    @Test
+    void strictAliasesRefuseUndeclaredAliasesWithOra12514() throws Exception {
+        try (FakeTnsServer backend = new FakeTnsServer(s -> {
+            OracleConnectionHandler.readConnectRequest(s.in);
+            FakeTnsServer.acceptAndEcho(s);
+        })) {
+            // default: an undeclared alias is accepted and becomes the application name
+            int port = startProxy("127.0.0.1", backend.port(), 0);
+            try (Socket s = client(port)) {
+                assertThat(send(s, TnsTestPackets.connect(318, CLIENT.replace("orders-service", "rogue-app"))).type()).isEqualTo(TnsPacket.TYPE_ACCEPT);
+                LiveConnection live = app.registry().all().iterator().next();
+                assertThat(live.application()).isEqualTo("rogue-app");
+                assertThat(live.applicationId()).isNull();
+            }
+            Await.until(3000, () -> app.registry().size() == 0, "slot released");
+            app.close();
+            events.clear();
+
+            port = startProxy("127.0.0.1", backend.port(), 0, defaultSettings().withStrictAliases(true));
+            try (Socket s = client(port)) {
+                TnsPacket reply = send(s, TnsTestPackets.connect(318, CLIENT.replace("orders-service", "rogue-app")));
+                assertThat(reply.type()).isEqualTo(TnsPacket.TYPE_REFUSE);
+                assertThat(TnsRefusePacket.errorCode(reply)).isEqualTo(12514);
+            }
+            Await.until(3000, () -> events.ofType("REFUSED").size() == 1, "REFUSED event");
+            assertThat(events.ofType("REFUSED").get(0).reason())
+                    .isEqualTo("undeclared application alias 'rogue-app' in service 'sales.rogue-app' (DBP_PROXY_STRICT_ALIASES=true)");
+            assertThat(app.metrics().scrape()).contains("reason=\"undeclared_alias\"");
+            // declared aliases and plain service names still work in strict mode
+            try (Socket s = client(port)) {
+                assertThat(send(s, TnsTestPackets.connect(318, CLIENT)).type()).isEqualTo(TnsPacket.TYPE_ACCEPT);
+            }
+            try (Socket s = client(port)) {
+                assertThat(send(s, TnsTestPackets.connect(318, CLIENT.replace("sales.orders-service", "sales"))).type()).isEqualTo(TnsPacket.TYPE_ACCEPT);
+            }
+            assertThat(backend.errors).isEmpty();
+        }
+    }
+
+    @Test
+    void unknownApplicationQuotaCapsConnectionsWithoutAnIdentity() throws Exception {
+        try (FakeTnsServer backend = new FakeTnsServer(s -> {
+            OracleConnectionHandler.readConnectRequest(s.in);
+            FakeTnsServer.acceptAndEcho(s);
+        })) {
+            int port = startProxy("127.0.0.1", backend.port(), 0, defaultSettings().withUnknownAppMaxConnections(1));
+            String anonymous = CLIENT.replace("sales.orders-service", "sales"); // no alias, program matches nothing -> NONE
+            try (Socket first = client(port)) {
+                assertThat(send(first, TnsTestPackets.connect(318, anonymous)).type()).isEqualTo(TnsPacket.TYPE_ACCEPT);
+                try (Socket second = client(port)) {
+                    TnsPacket reply = send(second, TnsTestPackets.connect(318, anonymous));
+                    assertThat(reply.type()).isEqualTo(TnsPacket.TYPE_REFUSE);
+                    assertThat(TnsRefusePacket.errorCode(reply)).isEqualTo(12516);
+                }
+                Await.until(3000, () -> events.ofType("REFUSED").size() == 1, "REFUSED event");
+                assertThat(events.ofType("REFUSED").get(0).reason()).startsWith("unknown-application quota exceeded: sales 1/1");
+                // a registered application is not affected by the unknown-application cap
+                try (Socket known = client(port)) {
+                    assertThat(send(known, TnsTestPackets.connect(318, CLIENT)).type()).isEqualTo(TnsPacket.TYPE_ACCEPT);
+                }
+            }
+            Await.until(3000, () -> app.registry().size() == 0, "slots released");
+        }
+    }
+
+    @Test
+    void shutdownReportsLiveConnectionsAsClosedExactlyOnce() throws Exception {
+        try (FakeTnsServer backend = new FakeTnsServer(s -> {
+            OracleConnectionHandler.readConnectRequest(s.in);
+            FakeTnsServer.acceptAndEcho(s);
+        })) {
+            int port = startProxy("127.0.0.1", backend.port(), 0);
+            try (Socket s = client(port)) {
+                assertThat(send(s, TnsTestPackets.connect(318, CLIENT)).type()).isEqualTo(TnsPacket.TYPE_ACCEPT);
+                Await.until(3000, () -> events.ofType("OPEN").size() == 1, "OPEN event");
+                app.close();
+                assertThat(events.ofType("CLOSE")).hasSize(1);
+                assertThat(events.ofType("CLOSE").get(0).reason()).isEqualTo("proxy shutdown");
+                assertThat(events.ofType("CLOSE").get(0).connection().get("connectionId")).isEqualTo(events.ofType("OPEN").get(0).connection().get("connectionId"));
+            }
+            // the client closing afterwards must not produce a second CLOSE for the same connection
+            Thread.sleep(300);
+            assertThat(events.ofType("CLOSE")).hasSize(1);
         }
     }
 }

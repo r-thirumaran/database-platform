@@ -115,5 +115,28 @@ class StaticConfigLoaderTest {
         assertThat(ProxySettings.defaults().adminPort()).isEqualTo(7431);
         assertThat(ProxySettings.defaults().controlPlaneMode()).isFalse();
         assertThatThrownBy(() -> ProxySettings.fromEnv(Map.of("DBP_PROXY_ADMIN_PORT", "x")::get)).isInstanceOf(IllegalArgumentException.class);
+
+        // admin API and quota hardening settings
+        ProxySettings d = ProxySettings.defaults();
+        assertThat(d.adminAddress()).as("admin follows the listen address unless set").isEqualTo(d.listenAddress()).isEqualTo("0.0.0.0");
+        assertThat(d.adminTokenRequired()).as("no DBP_SERVICE_TOKEN: admin endpoints stay open").isFalse();
+        assertThat(d.adminToken()).isNull();
+        assertThat(d.serviceToken()).isEqualTo("dev-service-token");
+        assertThat(d.strictAliases()).isFalse();
+        assertThat(d.unknownAppMaxConnections()).isZero();
+        assertThat(ProxySettings.fromEnv(Map.of("DBP_PROXY_LISTEN_ADDRESS", "10.0.0.5")::get).adminAddress()).isEqualTo("10.0.0.5");
+
+        Map<String, String> hardened = Map.of("DBP_SERVICE_TOKEN", " s3cret ", "DBP_PROXY_ADMIN_ADDRESS", "127.0.0.1",
+                "DBP_PROXY_STRICT_ALIASES", "yes", "DBP_PROXY_UNKNOWN_APP_MAX_CONNECTIONS", "7");
+        ProxySettings h = ProxySettings.fromEnv(hardened::get);
+        assertThat(h.adminAddress()).isEqualTo("127.0.0.1");
+        assertThat(h.adminTokenRequired()).isTrue();
+        assertThat(h.adminToken()).isEqualTo("s3cret");
+        assertThat(h.serviceToken()).isEqualTo("s3cret");
+        assertThat(h.strictAliases()).isTrue();
+        assertThat(h.unknownAppMaxConnections()).isEqualTo(7);
+        assertThat(h.withAdminToken(null).adminTokenRequired()).isFalse();
+        assertThat(d.withControlPlane("http://cp", "tok", "p9").adminToken()).as("an explicit token protects the admin API").isEqualTo("tok");
+        assertThatThrownBy(() -> ProxySettings.fromEnv(Map.of("DBP_PROXY_STRICT_ALIASES", "maybe")::get)).isInstanceOf(IllegalArgumentException.class);
     }
 }

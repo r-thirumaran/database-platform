@@ -189,21 +189,29 @@ class PostgresEndToEndTest {
             assertThat(live.bytesIn()).isPositive();
             assertThat(live.bytesOut()).isPositive();
 
-            HttpClient http = HttpClient.newBuilder().proxy(HttpClient.Builder.NO_PROXY).build();
-            String admin = "http://127.0.0.1:" + app.admin().port();
-            String connections = http.send(HttpRequest.newBuilder(URI.create(admin + "/connections")).build(), HttpResponse.BodyHandlers.ofString()).body();
+            // the service token is set, so /connections and /config require it; /health and /metrics stay open
+            assertThat(admin("/connections", null).statusCode()).isEqualTo(401);
+            assertThat(admin("/config", "wrong-token").statusCode()).isEqualTo(401);
+            assertThat(admin("/config", null).body()).contains("UNAUTHORIZED").doesNotContain("\"match\"");
+            HttpResponse<String> connectionsResponse = admin("/connections", "test-token");
+            assertThat(connectionsResponse.statusCode()).isEqualTo(200);
+            String connections = connectionsResponse.body();
             assertThat(connections).contains("\"proxyLocalPort\" : " + clientPort).contains("\"application\" : \"orders-service\"")
                     .contains("\"connectionId\" : \"" + live.id() + "\"");
-            String health = http.send(HttpRequest.newBuilder(URI.create(admin + "/health")).build(), HttpResponse.BodyHandlers.ofString()).body();
+            HttpResponse<String> healthResponse = admin("/health", null);
+            assertThat(healthResponse.statusCode()).isEqualTo(200);
+            String health = healthResponse.body();
             assertThat(health).contains("\"status\" : \"UP\"").contains("\"mode\" : \"control-plane\"").contains("\"name\" : \"postgres-main\"");
-            String metrics = http.send(HttpRequest.newBuilder(URI.create(admin + "/metrics")).build(), HttpResponse.BodyHandlers.ofString()).body();
+            HttpResponse<String> metricsResponse = admin("/metrics", null);
+            assertThat(metricsResponse.statusCode()).isEqualTo(200);
+            String metrics = metricsResponse.body();
             assertThat(metrics).contains("dbp_proxy_connections_accepted_total{listener=\"postgres-main\"}")
                     .contains("dbp_proxy_connections_active{application=\"orders-service\",backend=\"127.0.0.1:" + pg.getPort()
                             + "\",datasource=\"sales\",listener=\"postgres-main\"} 1.0")
                     .contains("dbp_proxy_bytes_in_bytes_total{listener=\"postgres-main\"}")
                     .contains("dbp_proxy_backend_connect_seconds_count");
-            String config = http.send(HttpRequest.newBuilder(URI.create(admin + "/config")).build(), HttpResponse.BodyHandlers.ofString()).body();
-            assertThat(config).contains("\"match\" : \"sales\"").doesNotContain("test-token");
+            String config = admin("/config", "test-token").body();
+            assertThat(config).contains("\"match\" : \"sales\"").contains("\"adminTokenRequired\" : true").doesNotContain("test-token");
         }
         Await.until(3000, () -> app.registry().size() == 0, "registry drained");
     }
@@ -325,6 +333,15 @@ class PostgresEndToEndTest {
             }
             Await.until(5000, () -> cp.heartbeats.stream().anyMatch(h -> Integer.valueOf(2).equals(h.get("configVersion"))), "heartbeat reports version 2");
         }
+    }
+
+    static HttpResponse<String> admin(String path, String token) throws Exception {
+        HttpClient http = HttpClient.newBuilder().proxy(HttpClient.Builder.NO_PROXY).build();
+        HttpRequest.Builder req = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.admin().port() + path));
+        if (token != null) {
+            req.header("X-DBP-Service-Token", token);
+        }
+        return http.send(req.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     @SuppressWarnings("unchecked")
