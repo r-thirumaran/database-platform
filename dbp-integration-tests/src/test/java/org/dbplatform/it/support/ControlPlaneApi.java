@@ -88,6 +88,13 @@ public final class ControlPlaneApi {
         return execute(req);
     }
 
+    /** Any absolute URL with the service token (component admin endpoints that require it, e.g. the proxy's /connections). */
+    public Response getAbsoluteWithToken(String url) {
+        HttpRequest req = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(20))
+                .header("X-DBP-Service-Token", serviceToken).GET().build();
+        return execute(req);
+    }
+
     private HttpRequest.Builder request(String path) {
         String p = path.startsWith("/") ? path : "/" + path;
         return HttpRequest.newBuilder(URI.create(baseUrl + "/api/v1" + p)).timeout(Duration.ofSeconds(30))

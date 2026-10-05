@@ -83,7 +83,7 @@ class S10ProxyIT {
             }
             assertThat(clientPort).isPositive();
             JsonNode adminConn = Await.until("proxy /connections lists the proxied connection", Duration.ofSeconds(15), () ->
-                    stream(s.cp().getAbsolute(proxy.adminUrl() + "/connections").json())
+                    stream(s.cp().getAbsoluteWithToken(proxy.adminUrl() + "/connections").json())
                             .filter(x -> x.path("proxyLocalPort").asInt() == clientPort).findFirst());
             assertThat(adminConn.path("application").asText()).isEqualTo(ORDERS);
             assertThat(adminConn.path("identitySource").asText()).isEqualTo("SERVICE_ALIAS");

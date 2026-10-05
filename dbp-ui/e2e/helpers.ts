@@ -35,6 +35,11 @@ export function watch(page: Page, testInfo: TestInfo, options: { allowStatus?: (
   const issues: Issue[] = [];
   page.on('console', (msg) => {
     if (msg.type() !== 'error') return;
+    // Chromium logs its own line for every failed resource; tolerate it for responses the test allows
+    if (msg.text().startsWith('Failed to load resource') && options.allowStatus) {
+      const m = /status of (\d{3})/.exec(msg.text());
+      if (m && options.allowStatus(msg.location().url, Number(m[1]))) return;
+    }
     issues.push({ kind: 'console', detail: msg.text().split('\n')[0].slice(0, 300) });
   });
   page.on('pageerror', (err) => issues.push({ kind: 'pageerror', detail: err.message.slice(0, 300) }));
