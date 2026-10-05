@@ -70,7 +70,9 @@ Resolution order per session: grant override (`poolModeOverride` / static `appli
 
 Credential rotation: the next resolution carries a new `credential.version` → a new pool is created for new
 pins, the old one is marked draining (`softEvictConnections`) and closed once nothing is borrowed from it.
-Existing logical sessions switch to the new pool at their next pin (after COMMIT/ROLLBACK in TRANSACTION mode).
+Existing logical sessions re-resolve their datasource at every pin (a cache lookup; one `/internal/resolve` call
+after a `configVersion` change, never a re-authentication) and so switch to the new pool at their next pin
+(after COMMIT/ROLLBACK in TRANSACTION mode).
 
 ### Physical pools
 
@@ -189,7 +191,7 @@ The full example ships as `src/main/resources/gateway-example.yaml`.
 | `dbp_gateway_pool_active` / `_idle` / `_waiting` / `_total` / `_max` | `datasource`           |
 | `dbp_gateway_statements_total`                           | `datasource`, `operation`, `success` |
 | `dbp_gateway_statement_duration_seconds` (histogram: `_bucket`, `_count`, `_sum`, `_max`) | `datasource` |
-| `dbp_gateway_errors_total`                               | `sqlstate`                         |
+| `dbp_gateway_errors_total` (every ERROR frame sent, incl. rejected HELLOs) | `sqlstate`         |
 | `dbp_gateway_telemetry_dropped_total`                    | –                                  |
 
 ## Telemetry
@@ -214,6 +216,26 @@ every `DBP_POOL_STATS_SECONDS`, heartbeats every `DBP_HEARTBEAT_SECONDS`.
 * 4 CPU cores comfortably drive a few hundred logical sessions; the physical pool, not the gateway, is the
   bottleneck.
 
+## Protocol behaviour worth knowing (driver side)
+
+* `expect = QUERY` on a statement that yields no result set answers ERROR `07005` **after** the statement ran
+  (PostgreSQL/Oracle behave the same way for `executeQuery`); `expect = UPDATE` on a query is `07005` too.
+* A ROWS frame may hold fewer rows than `fetchSize` (soft byte limit); only `last` tells whether the cursor is
+  exhausted. ERROR can terminate an EXECUTE sequence after RESULT_SET_HEADER/ROWS were sent.
+* Pure OUT parameters: send `NULL` (or a typed null) at that index in `params` (or omit trailing entries); the
+  gateway registers OUT parameters first and does not bind such placeholders. INOUT parameters carry their value.
+* `OUT_PARAMS` is sent whenever `OutParam[]` was non-empty; cursor-typed entries carry the `INT` cursorId of the
+  result item streamed just before (section 4.7). `GENERATED_KEYS` is sent only when requested *and* the driver
+  returned keys.
+* Every HELLO failure is `fatal = 1` and the socket is closed. `08001` (pool exhausted / database down) on a
+  statement is **not** fatal: the session survives and may retry. `08006` is fatal (idle timeout, lost physical
+  connection with state, shutdown).
+* COMMIT/ROLLBACK with autocommit on are no-ops (OK); CLOSE_CURSOR of an unknown cursor is OK; FETCH of an
+  unknown/closed cursor, unknown statement/savepoint ids are `HY000`. Unnamed savepoints are named `DBP_SP_<n>`.
+* `PREPARED.parameterCount` is always `-1`.
+* With `expect = ANY`, when the first result set is not exhausted by the first ROWS frame and the physical driver
+  cannot `getMoreResults(KEEP_CURRENT_RESULT)`, further results of that execution are not delivered.
+
 ## Limitations
 
 * No XA / distributed transactions.
@@ -223,8 +245,9 @@ every `DBP_POOL_STATS_SECONDS`, heartbeats every `DBP_HEARTBEAT_SECONDS`.
 * `SESSION` mode gives no multiplexing for that application.
 * One gateway instance = one pool set. Scale horizontally with care: pools are not coordinated across
   instances (each one honours its own `maxConnections`).
-* The gateway runs physical JDBC calls on virtual threads; drivers that hold monitors during network I/O pin
-  carrier threads, which limits parallelism to the number of carriers while statements run on the database.
+* The gateway runs physical JDBC calls on virtual threads (JDK 21); drivers that hold monitors during network
+  I/O pin carrier threads, which limits parallelism to the number of carriers while statements run on the
+  database. The gateway itself never holds a monitor around pool or driver calls (j.u.c locks only).
 * `PREPARED.parameterCount` is always `-1` (the gateway never touches the database at PREPARE time).
 
 ## Build and test

@@ -12,6 +12,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Owns every {@link PhysicalPool} of the gateway, keyed by (physical database, credential version). When a newer
@@ -30,7 +31,7 @@ public final class PoolManager implements AutoCloseable {
 
     private final String gatewayId;
     private final Map<String, PhysicalPool> pools = new ConcurrentHashMap<>();
-    private final Map<String, Object> locks = new ConcurrentHashMap<>();
+    private final Map<String, ReentrantLock> locks = new ConcurrentHashMap<>();
     private volatile boolean closed;
 
     public PoolManager(String gatewayId) {
@@ -55,8 +56,9 @@ public final class PoolManager implements AutoCloseable {
             existing.addDatasourceName(template.datasourceName());
             return existing;
         }
-        Object lock = locks.computeIfAbsent(key, k -> new Object());
-        synchronized (lock) {
+        ReentrantLock lock = locks.computeIfAbsent(key, k -> new ReentrantLock());
+        lock.lock(); // j.u.c lock: creating a pool blocks on the database and must not pin a carrier thread
+        try {
             existing = pools.get(key);
             if (existing != null && !existing.isClosed()) {
                 existing.addDatasourceName(template.datasourceName());
@@ -74,6 +76,8 @@ public final class PoolManager implements AutoCloseable {
             pools.put(key, created);
             drainOlder(created);
             return created;
+        } finally {
+            lock.unlock();
         }
     }
 

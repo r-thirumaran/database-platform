@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * One HikariCP pool for one (physical database, credential version). Holds the cached HELLO_OK server properties
@@ -45,6 +46,7 @@ public final class PhysicalPool {
     private volatile String defaultSchema;
     private volatile String defaultCatalog;
     private volatile boolean baselineCaptured;
+    private final ReentrantLock initLock = new ReentrantLock();
     private final Map<String, String> baselineClientInfo;
 
     PhysicalPool(PoolSettings settings, String gatewayId) throws SQLException {
@@ -165,7 +167,8 @@ public final class PhysicalPool {
     }
 
     private void captureBaseline(Connection c) {
-        synchronized (this) {
+        initLock.lock();
+        try {
             if (baselineCaptured) {
                 return;
             }
@@ -180,6 +183,8 @@ public final class PhysicalPool {
                 defaultCatalog = null;
             }
             baselineCaptured = true;
+        } finally {
+            initLock.unlock();
         }
     }
 
@@ -236,7 +241,8 @@ public final class PhysicalPool {
         if (p != null) {
             return p;
         }
-        synchronized (this) {
+        initLock.lock();
+        try {
             if (serverProperties != null) {
                 return serverProperties;
             }
@@ -252,6 +258,8 @@ public final class PhysicalPool {
             } finally {
                 release(c, false);
             }
+        } finally {
+            initLock.unlock();
         }
     }
 

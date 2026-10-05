@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * A logical JDBC connection of an application. Holds the remembered settings, registered statements, open cursors
@@ -82,6 +83,7 @@ public final class LogicalSession {
     private final Map<Integer, Cursor> cursors = new LinkedHashMap<>();
     private final Map<String, Savepoint> savepoints = new HashMap<>();
     private final List<String> appliedClientInfo = new ArrayList<>();
+    private final ReentrantLock lifecycle = new ReentrantLock();
 
     private Connection physical;
     private PhysicalPool pinnedPool;
@@ -344,7 +346,18 @@ public final class LogicalSession {
     }
 
     /** Unconditionally returns the physical connection to its pool ({@code evict} discards a broken one). */
-    public synchronized void release(boolean evict) {
+    public void release(boolean evict) {
+        // a j.u.c lock, never a monitor: a monitor held while HikariCP hands the connection back pins the carrier
+        // thread and turns Hikari's Thread.yield() spin into a busy loop that can starve the whole scheduler
+        lifecycle.lock();
+        try {
+            releaseLocked(evict);
+        } finally {
+            lifecycle.unlock();
+        }
+    }
+
+    private void releaseLocked(boolean evict) {
         Connection c = physical;
         PhysicalPool pool = pinnedPool;
         if (c == null) {
@@ -716,19 +729,24 @@ public final class LogicalSession {
     // ------------------------------------------------------------------ lifecycle
 
     /** Closes the logical session: rollback if needed, reset the physical connection and return it to the pool. */
-    public synchronized void close() {
-        if (closed) {
-            return;
-        }
-        closed = true;
+    public void close() {
+        lifecycle.lock();
         try {
-            if (physical != null) {
-                release(false);
+            if (closed) {
+                return;
             }
-        } catch (RuntimeException e) {
-            LOG.debug("session {} close failed: {}", id, e.toString());
+            closed = true;
+            try {
+                if (physical != null) {
+                    releaseLocked(false);
+                }
+            } catch (RuntimeException e) {
+                LOG.debug("session {} close failed: {}", id, e.toString());
+            }
+            prepared.clear();
+        } finally {
+            lifecycle.unlock();
         }
-        prepared.clear();
     }
 
     static void closeQuietly(Statement st) {
