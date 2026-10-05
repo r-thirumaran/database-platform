@@ -241,12 +241,13 @@ test('applications: summary, api keys, identity rules, access, grants', async ({
   await w.assertClean();
 });
 
-test('teams: list and summary', async ({ page }, testInfo) => {
+test('teams: list and summary', async ({ page, request }, testInfo) => {
   const w = watch(page, testInfo);
+  const team = await byName<Named & { displayName: string }>(request, '/teams', 'sales-platform');
   await page.goto('/teams');
   await expect(heading(page)).toHaveText('Teams');
-  await page.getByRole('link', { name: 'Sales Platform Team' }).first().click();
-  await expect(heading(page)).toContainText('Sales Platform Team');
+  await page.getByRole('link', { name: team.displayName, exact: true }).first().click();
+  await expect(heading(page)).toContainText(team.displayName);
   await expect(page.getByText('Owned tables').first()).toBeVisible();
   await expect(region(page, 'Applications').getByRole('link', { name: 'orders-service' })).toBeVisible();
   await expect(region(page, 'Owned tables').getByRole('link', { name: 'SALES.ORDERS', exact: true })).toBeVisible();
@@ -481,10 +482,13 @@ test('governance: policies, violation lifecycle, evaluate', async ({ page, reque
   const policies = await getJson<Array<{ id: string; kind: string; enabled: boolean; severity: string }>>(request, '/governance/policies');
   const pol = policies.find((p) => p.kind === 'CROSS_TEAM_DIRECT_ACCESS')!;
   const prow = region(page, 'Policies').locator('tbody tr').filter({ hasText: 'Cross-team direct access' });
+  const policyToggle = prow.getByRole('checkbox');
   await prow.locator('label.switch').click();
   await expect.poll(async () => (await getJson<Array<{ id: string; enabled: boolean }>>(request, '/governance/policies')).find((p) => p.id === pol.id)!.enabled).toBe(!pol.enabled);
+  await expect(policyToggle).toBeChecked({ checked: !pol.enabled }); // the switch mirrors server state; wait for the refetch before toggling back
   await prow.locator('label.switch').click();
   await expect.poll(async () => (await getJson<Array<{ id: string; enabled: boolean }>>(request, '/governance/policies')).find((p) => p.id === pol.id)!.enabled).toBe(pol.enabled);
+  await expect(policyToggle).toBeChecked({ checked: pol.enabled });
   await prow.getByRole('combobox').selectOption('HIGH');
   await expect.poll(async () => (await getJson<Array<{ id: string; severity: string }>>(request, '/governance/policies')).find((p) => p.id === pol.id)!.severity).toBe('HIGH');
   await prow.getByRole('combobox').selectOption(pol.severity);

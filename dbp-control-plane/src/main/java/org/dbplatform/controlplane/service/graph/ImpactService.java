@@ -200,9 +200,24 @@ public class ImpactService {
             if (column.getClassification() == Enums.Classification.PII) { factors.add("column classified PII"); score = Math.min(1.0, score + 0.1); }
         }
         Target target = column == null ? new Target("TABLE", t.getId(), t.label()) : new Target("COLUMN", column.getId(), t.label() + "." + column.getName());
-        return new Impact(target, owner, producer, new ArrayList<>(direct.values()), new ArrayList<>(indirect.values()), routs, trigs, views, fkDependents,
+        // deterministic output: relationships come back in storage order, which differs between H2 and PostgreSQL
+        List<SummaryService.Consumer> directList = new ArrayList<>(direct.values());
+        List<SummaryService.Consumer> indirectList = new ArrayList<>(indirect.values());
+        directList.sort(CONSUMER_ORDER);
+        indirectList.sort(CONSUMER_ORDER);
+        routs.sort(Comparator.comparing(RoutineRef::label));
+        trigs.sort(Comparator.comparing(RoutineRef::label));
+        views.sort(Comparator.comparing(TableRef::label));
+        fkDependents.sort(Comparator.comparing(TableRef::label));
+        return new Impact(target, owner, producer, directList, indirectList, routs, trigs, views, fkDependents,
                 teamsAffected, qs, round(score), factors, column, colQueries);
     }
+
+    /** Busiest first, then application name, kind and the routine/view the access goes through. */
+    static final Comparator<SummaryService.Consumer> CONSUMER_ORDER = Comparator.comparingLong(SummaryService.Consumer::queryCount).reversed()
+            .thenComparing(Comparator.comparing((SummaryService.Consumer c) -> c.application().getName()))
+            .thenComparing(Comparator.comparing((SummaryService.Consumer c) -> c.kind().name()))
+            .thenComparing(Comparator.comparing((SummaryService.Consumer c) -> c.viaRoutine() != null ? c.viaRoutine().label() : c.viaView() != null ? c.viaView().label() : ""));
 
     /** Risk score 0..1 from consuming teams, write-path complexity, volume, classification and migration state. */
     static double risk(DbTable t, int consumers, int teamsAffected, int triggers, int routines, int views, StatsService.QueryStats qs, List<String> factors) {

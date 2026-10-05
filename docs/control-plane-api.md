@@ -95,7 +95,8 @@ Identity rules are how **proxy** and **collectors** map observed connections to 
   "description": "…", "tags": [], "createdAt": "…", "updatedAt": "…" }
 ```
 * `GET /databases`, `POST /databases`, `GET /databases/{id}`, `PUT /databases/{id}`, `DELETE /databases/{id}`
-* `POST /databases/{id}/test-connection` → `{ "ok": true, "productName": "…", "productVersion": "…", "latencyMs": 12 }`
+* `POST /databases/{id}/test-connection` → `{ "ok": true, "productName": "…", "productVersion": "…", "latencyMs": 12 }`; an unreachable
+  database or an unresolvable credential answers **200** `{ "ok": false, "latencyMs": 6, "message": "…" }` (never a 5xx)
 * `POST /databases/{id}/collect` `{ "what": "DICTIONARY | RUNTIME | AUDIT" }` → `{ "started": true }` (manual trigger)
 * `GET /databases/{id}/schemas` → `[{ "name": "SALES", "tableCount": 12, "routineCount": 7 }]`
 * `GET /databases/{id}/collector-status` → `{ "lastDictionaryRun": "…", "lastRuntimeRun": "…", "lastError": null, "tablesSeen": 42 }`
@@ -196,9 +197,10 @@ the table). Both the direct relationship (app CALLS routine) and the expanded on
 via routine) are stored, so the graph can show either view.
 
 Endpoints:
-* `GET /tables?databaseId=&schema=&q=&ownerTeamId=&unowned=true&page=&size=` → paged `Table[]`
-* `GET /tables/{id}`, `PUT /tables/{id}` (owner, producer, description, tags, classification, migration)
-* `GET /tables/{id}/columns`, `PUT /tables/{id}/columns/{columnId}` (comment/classification)
+* `GET /tables?databaseId=&schema=&q=&ownerTeamId=&unowned=true&classification=&page=&size=` → paged `Table[]`
+* `GET /tables/{id}`, `PUT /tables/{id}` (owner, producer, description, tags, classification, migration) — partial update:
+  absent fields are left unchanged, an explicit `null` (or blank string) clears a field
+* `GET /tables/{id}/columns`, `PUT /tables/{id}/columns/{columnId}` (comment/classification, same partial semantics)
 * `GET /tables/{id}/summary` →
   ```json
   { "table": {…}, "database": {…}, "ownerTeam": {…}, "producer": Application,
@@ -224,7 +226,8 @@ Endpoints:
                 "attrs": { "queryCount": 120, "lastSeenAt": "…", "source": "GATEWAY", "confirmed": false } }],
     "truncated": false }
   ```
-  Node id format is `<type>:<refId>` with lowercase type. Edge directions: `team OWNS table/routine/datasource`,
+  Node id format is `<type>:<refId>` with lowercase type. Besides the kinds above the control plane emits
+  `datasource ROUTES_TO database`, `application PRODUCES table` (declared producer) and `application GRANTED datasource`. Edge directions: `team OWNS table/routine/datasource`,
   `application BELONGS_TO team`, `application READS/WRITES table`, `application CALLS routine`, `routine REFERENCES/READS/WRITES table`,
   `table TRIGGERS routine`, `table FOREIGN_KEY table`, `database HOSTS table/routine`, `datasource HOSTS` is not used (datasource `ROUTES_TO` database),
   `datasource/table MIGRATES_TO database/table`. Indirect relationships (`viaRoutineId` set) are omitted unless `includeIndirect=true`

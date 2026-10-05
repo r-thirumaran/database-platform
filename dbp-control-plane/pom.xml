@@ -113,7 +113,28 @@
 
     <build>
         <finalName>dbp-control-plane</finalName>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <!-- UI bundle. When dbp-ui has been built (cd dbp-ui && npm run build) its dist/ is served from
+                 classpath:/static/ and replaces the placeholder index.html (resources are copied in order with
+                 overwrite=true). A missing directory is skipped, so a plain API build still works. The Docker build
+                 (deploy/docker/Dockerfile.control-plane) copies dist/ into src/main/resources/static/ instead; both
+                 paths end up with exactly one index.html in BOOT-INF/classes/static/. -->
+            <resource>
+                <directory>${project.basedir}/../dbp-ui/dist</directory>
+                <targetPath>static</targetPath>
+            </resource>
+        </resources>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <configuration>
+                    <overwrite>true</overwrite>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

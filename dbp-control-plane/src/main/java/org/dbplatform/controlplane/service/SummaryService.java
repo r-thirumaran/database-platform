@@ -217,7 +217,10 @@ public class SummaryService {
             double confidence = Math.max(Enums.confidenceOf(r.getSource()), prev == null ? 0 : prev.confidence());
             agg.put(key, new Consumer(app, team, r.getKind(), src, confidence, confirmed, count, last, via, null, last == null || last.isBefore(staleBefore)));
         }
-        return agg.values().stream().sorted(Comparator.comparingLong(Consumer::queryCount).reversed()).toList();
+        // busiest first; ties broken by application and kind so the order does not depend on storage order
+        return agg.values().stream().sorted(Comparator.comparingLong(Consumer::queryCount).reversed()
+                .thenComparing(Comparator.comparing((Consumer c) -> c.application().getName()))
+                .thenComparing(Comparator.comparing((Consumer c) -> c.kind().name()))).toList();
     }
 
     public RoutineSummary routine(String id) {

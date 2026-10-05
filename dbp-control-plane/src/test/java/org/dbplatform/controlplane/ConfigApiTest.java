@@ -192,7 +192,7 @@ class ConfigApiTest extends AbstractApiTest {
         // switch records a migration event and clears target
         JsonNode switched = postJson("/api/v1/datasources/" + dsId + "/switch", Map.of("databaseId", pg.get("id").asText(), "by", "tester"), 200);
         assertThat(switched.get("currentDatabaseId").asText()).isEqualTo(pg.get("id").asText());
-        assertThat(switched.get("targetDatabaseId")).isNull();
+        assertThat(switched.hasNonNull("targetDatabaseId")).isFalse(); // cleared: JSON null (or absent)
         assertThat(switched.get("state").asText()).isEqualTo("ACTIVE");
         JsonNode events = getJson("/api/v1/migration-events?datasourceId=" + dsId, 200);
         assertThat(events).hasSize(1);

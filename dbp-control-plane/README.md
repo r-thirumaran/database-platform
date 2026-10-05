@@ -3,7 +3,10 @@
 Spring Boot 3 service that is the **control plane** (configuration, identity, routing, credentials), the
 **metadata plane** (catalogue, ownership, producer/consumer graph, impact analysis), the **telemetry
 sink** and the home of the **database collectors** of the Database Access Platform. It also serves the
-UI build (`dbp-ui/dist` copied into `classpath:/static/`).
+UI build from `classpath:/static/`: `mvn package` bundles `../dbp-ui/dist` automatically when it exists
+(`cd dbp-ui && npm run build` first) and the Docker build copies `dist/` into `src/main/resources/static/`;
+either way exactly one `index.html` ends up in the jar. Deep links such as `/tables/<id>` fall back to
+`index.html`; `/api/**`, `/actuator/**`, `/v3/**` and `/swagger-ui*` never do.
 
 The REST contract is `docs/control-plane-api.md`; telemetry payloads are `docs/telemetry-events.md`
 (records from `dbp-common`); the model is `docs/metadata-model.md`.

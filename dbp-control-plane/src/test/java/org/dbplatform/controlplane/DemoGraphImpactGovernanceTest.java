@@ -123,11 +123,11 @@ class DemoGraphImpactGovernanceTest extends AbstractApiTest {
         impact.get("directConsumers").forEach(c -> direct.add(c.get("application").get("name").asText() + ":" + c.get("kind").asText()));
         assertThat(direct).contains("orders-service:READS", "orders-service:WRITES", "payment-service:READS", "reporting-batch:READS", "legacy-billing:WRITES");
         List<String> indirect = new ArrayList<>();
-        impact.get("indirectConsumers").forEach(c -> indirect.add(c.get("application").get("name").asText() + ":" + c.get("kind").asText() + ":" + (c.get("viaRoutine") != null ? c.get("viaRoutine").get("name").asText() : "view:" + c.get("viaView").get("name").asText())));
+        impact.get("indirectConsumers").forEach(c -> indirect.add(c.get("application").get("name").asText() + ":" + c.get("kind").asText() + ":" + viaLabel(c)));
         assertThat(indirect).contains("orders-service:WRITES:ORDER_PKG.PLACE_ORDER", "customer-portal:READS:GET_CUSTOMER_TIER", "reporting-batch:READS:view:V_ORDER_SUMMARY");
-        assertThat(impact.get("triggers").get(0).get("name").asText()).isEqualTo("TRG_ORDERS_AUDIT");
+        assertThat(names(impact.get("triggers"))).contains("TRG_ORDERS_AUDIT");
         assertThat(impact.get("routines").toString()).contains("ORDER_PKG.PLACE_ORDER").contains("GET_CUSTOMER_TIER");
-        assertThat(impact.get("dependentViews").get(0).get("name").asText()).isEqualTo("V_ORDER_SUMMARY");
+        assertThat(names(impact.get("dependentViews"))).contains("V_ORDER_SUMMARY");
         assertThat(impact.get("foreignKeyDependents").toString()).contains("ORDER_ITEM").contains("PAYMENT");
         List<String> teams = new ArrayList<>();
         impact.get("teamsAffected").forEach(t -> teams.add(t.get("name").asText()));
@@ -149,7 +149,10 @@ class DemoGraphImpactGovernanceTest extends AbstractApiTest {
         // datasource impact aggregates every table of the current database
         JsonNode dsImpact = null;
         for (JsonNode ds : getJson("/api/v1/datasources", 200)) if (ds.get("name").asText().equals("sales")) dsImpact = getJson("/api/v1/impact/datasource/" + ds.get("id").asText(), 200);
-        assertThat(dsImpact.get("tables").size()).isEqualTo(8);
+        // other test classes share the context and may have discovered extra tables on the demo database
+        List<String> dsTables = new ArrayList<>();
+        dsImpact.get("tables").forEach(x -> dsTables.add(x.get("table").get("label").asText()));
+        assertThat(dsTables).hasSizeGreaterThanOrEqualTo(8).contains("SALES.ORDERS", "SALES.CUSTOMER", "SALES.ORDER_ITEM");
         assertThat(dsImpact.get("tables").get(0).get("consumers").isArray()).isTrue();
         assertThat(dsImpact.get("tables").get(0).get("queryCount").asLong()).isPositive();
         assertThat(dsImpact.get("applications").size()).isGreaterThanOrEqualTo(6);
@@ -169,17 +172,17 @@ class DemoGraphImpactGovernanceTest extends AbstractApiTest {
 
         // table summary: views as TableRef, FK lists, consumers with viaRoutine
         JsonNode summary = getJson("/api/v1/tables/" + orders.get("id").asText() + "/summary", 200);
-        assertThat(summary.get("views").get(0).get("name").asText()).isEqualTo("V_ORDER_SUMMARY");
-        assertThat(summary.get("foreignKeysOut").get(0).get("name").asText()).isEqualTo("CUSTOMER");
-        assertThat(summary.get("foreignKeysIn").size()).isEqualTo(2);
+        assertThat(names(summary.get("views"))).contains("V_ORDER_SUMMARY");
+        assertThat(names(summary.get("foreignKeysOut"))).contains("CUSTOMER");
+        assertThat(names(summary.get("foreignKeysIn"))).contains("ORDER_ITEM", "PAYMENT");
         assertThat(summary.get("topQueries").size()).isGreaterThanOrEqualTo(1);
         boolean via = false;
-        for (JsonNode c : summary.get("consumers")) if (c.get("viaRoutine") != null && c.get("viaRoutine").get("name").asText().equals("ORDER_PKG.PLACE_ORDER")) via = true;
+        for (JsonNode c : summary.get("consumers")) if (c.hasNonNull("viaRoutine") && c.get("viaRoutine").get("name").asText().equals("ORDER_PKG.PLACE_ORDER")) via = true;
         assertThat(via).isTrue();
         // ownership endpoints
         JsonNode bulk = postJson("/api/v1/tables/bulk-ownership", Map.of("databaseId", orders.get("databaseId").asText(), "schema", "SALES", "teamId", orders.get("ownerTeamId").asText()), 200);
         assertThat(bulk.get("ok").asBoolean()).isTrue();
-        assertThat(bulk.get("updated").asInt()).isEqualTo(8);
+        assertThat(bulk.get("updated").asInt()).isGreaterThanOrEqualTo(8);
         JsonNode own = postJson("/api/v1/tables/" + orders.get("id").asText() + "/ownership", Map.of("teamId", orders.get("ownerTeamId").asText(), "confirmed", true), 200);
         assertThat(own.get("ownerConfirmed").asBoolean()).isTrue();
         JsonNode upd = putJson("/api/v1/tables/" + orders.get("id").asText(), Map.of("classification", "CONFIDENTIAL", "tags", List.of("demo", "core")), 200);
@@ -331,5 +334,18 @@ class DemoGraphImpactGovernanceTest extends AbstractApiTest {
             node.forEach(child -> rename(child, prefix));
         }
         return node;
+    }
+
+    /** Indirect consumers carry a {@code viaRoutine} or a {@code viaView}; a JSON null and an absent field are the same thing. */
+    private static String viaLabel(JsonNode c) {
+        if (c.hasNonNull("viaRoutine")) return c.get("viaRoutine").get("name").asText();
+        if (c.hasNonNull("viaView")) return "view:" + c.get("viaView").get("name").asText();
+        return "direct";
+    }
+
+    private static List<String> names(JsonNode array) {
+        List<String> out = new ArrayList<>();
+        array.forEach(n -> out.add(n.get("name").asText()));
+        return out;
     }
 }

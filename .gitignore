@@ -34,3 +34,7 @@ data/
 .env
 .env.local
 deploy/.env
+
+# UI bundle copied into the control plane (Docker build); the placeholder index.html stays tracked
+dbp-control-plane/src/main/resources/static/assets/
+dbp-control-plane/src/main/resources/static/favicon.svg

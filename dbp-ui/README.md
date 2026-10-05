@@ -11,8 +11,9 @@ React 18 + TypeScript + Vite single-page app for the control plane described in
 cd dbp-ui
 npm install
 
-# A. against the real control plane (Spring Boot on 8080)
-npm run dev                 # http://localhost:5173
+# A. against the real control plane (Spring Boot on 8080, seeded with POST /api/v1/seed/demo)
+npm run dev                 # http://localhost:5173 — /api and /actuator are proxied to http://localhost:8080
+DBP_API_URL=http://cp.internal:8080 npm run dev   # another control plane address
 
 # B. against the built-in mock control plane (no Java needed)
 npm run mock                # http://localhost:8080/api/v1 — in-memory retail demo dataset
@@ -36,7 +37,8 @@ as the control plane would.
 | `npm run lint`      | ESLint (typescript-eslint, react-hooks, react-refresh), zero warnings. |
 | `npm run typecheck` | `tsc --noEmit` for the app and for `vite.config.ts` / `mock/` / `e2e/`. |
 | `npm run test`      | Vitest (API client, formatting, components).                     |
-| `npm run e2e`       | Playwright smoke test; starts the mock and the dev server itself. Chromium is expected at `$PLAYWRIGHT_BROWSERS_PATH`. |
+| `npm run e2e`       | Playwright (smoke + page-by-page walkthrough); starts the mock and the dev server itself. Chromium is expected at `$PLAYWRIGHT_BROWSERS_PATH`. |
+| `npm run e2e:real`  | Same specs against a **real, seeded control plane** on `http://localhost:8080` (override with `PW_BASE_URL`); only the dev server is started. The walkthrough clicks through every page, exercises every mutation (and undoes it) and fails on any console error or 4xx/5xx response. |
 | `npm run check`     | lint + typecheck + test + build.                                 |
 
 ## Environment
@@ -44,6 +46,8 @@ as the control plane would.
 | Variable        | Default | Meaning |
 |-----------------|---------|---------|
 | `VITE_API_BASE` | `""`    | Prefix for every API call (`${VITE_API_BASE}/api/v1/...`). Empty = same origin, which is what the control plane and the dev proxy need. Set e.g. `https://control-plane.example.org` to point a static build elsewhere. |
+| `DBP_API_URL`   | `http://localhost:8080` | Dev server / Playwright only: where the Vite proxy forwards `/api` and `/actuator`. |
+| `PW_USE_REAL_API`, `PW_BASE_URL` | unset | Playwright: skip the mock and target a real control plane (`npm run e2e:real`). |
 
 Theme follows `prefers-color-scheme`; the toggle in the sidebar (system / light / dark) is stored in
 `localStorage` only.
@@ -80,6 +84,14 @@ e2e/            Playwright smoke test
 
 Lists that can grow (tables) use the paged form (`?page=&size=` → `{ items, page, size, total }`); the
 other lists use the plain-array form. Every page has loading, error (with retry) and empty states.
+
+Contract details the pages rely on (verified against the Spring Boot control plane with `npm run e2e:real`):
+`PUT` on teams, applications, databases, datasources and access grants replaces the whole resource, so the
+pages always send the full object (pool policy, identity rules and grant toggles included); `PUT /tables/{id}`
+and `PUT /tables/{id}/columns/{columnId}` are partial and an explicit `null` clears a field; routine summaries
+return `callers` as `ConsumerEntry[]` and incoming dependencies as `referencedBy`; datasource impact lists
+`applications[]` (not consumers); views are tables of kind `VIEW`; the graph may carry the additional edge kinds
+`ROUTES_TO`, `PRODUCES` and `GRANTED`.
 
 ## Charts
 
