@@ -12,7 +12,7 @@ import java.util.regex.Pattern;
  */
 public final class Durations {
 
-    private static final Pattern PART = Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*(ms|millis|milliseconds|s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours|d|days?)?");
+    private static final Pattern PART = Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*(milliseconds|millis|ms|seconds|secs|sec|s|minutes|mins|min|m|hours|hrs|hr|h|days|day|d)?");
 
     private Durations() {}
 

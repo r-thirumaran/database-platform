@@ -108,6 +108,7 @@ class ControlPlaneClientTest {
                 os.write(bytes);
             }
         });
+        server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool()); // the "slow" handler must not block others
         server.start();
         client = new ControlPlaneClient("http://127.0.0.1:" + server.getAddress().getPort() + "/", "svc-token",
                 Duration.ofMillis(800));
@@ -116,6 +117,7 @@ class ControlPlaneClientTest {
     @AfterEach
     void stop() {
         server.stop(0);
+        ((java.util.concurrent.ExecutorService) server.getExecutor()).shutdownNow();
     }
 
     @Test

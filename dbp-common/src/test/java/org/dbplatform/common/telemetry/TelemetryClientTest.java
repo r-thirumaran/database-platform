@@ -112,7 +112,7 @@ class TelemetryClientTest {
             client.flush();
             await().atMost(Duration.ofSeconds(5)).until(() -> received.size() >= 3);
             assertThat(received.get(2).body()).hasSize(200);
-            assertThat(client.sentCount()).isEqualTo(1200);
+            await().atMost(Duration.ofSeconds(5)).until(() -> client.sentCount() == 1200); // counted after the response
             assertThat(client.droppedCount()).isZero();
         }
         // close() with nothing left does not post anything else

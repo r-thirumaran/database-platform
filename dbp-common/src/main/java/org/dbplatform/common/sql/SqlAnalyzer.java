@@ -56,6 +56,8 @@ public final class SqlAnalyzer {
     /** Statements longer than this are not parsed with JSqlParser (regex fallback only) to bound CPU use. */
     public static final int MAX_PARSE_LENGTH = 100_000;
     public static final int MAX_COLUMNS = 200;
+    /** Statements nested deeper than this are not parsed with JSqlParser (regex fallback only). */
+    public static final int MAX_NESTING_DEPTH = 12;
 
     private static final Pattern NUMERIC_BIND = Pattern.compile("(?<![:\\w$#\"\\]])(:\\d+)");
     private static final Pattern RETURNING_INTO = Pattern.compile("(\\bRETURNING\\b[^;]*?)\\s+INTO\\s+[^;]*$", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
@@ -204,6 +206,11 @@ public final class SqlAnalyzer {
         if (prepared.isEmpty()) {
             return List.of();
         }
+        if (nestingDepth(scrubbed) > MAX_NESTING_DEPTH) {
+            // Unbalanced parentheses make JavaCC's error recovery take ~0.5 s per open paren, and lookahead over
+            // deeply nested parentheses is exponential (CCJSqlParserUtil applies the same depth guard).
+            return List.of();
+        }
         boolean brackets = engine == Engine.MSSQL || engine == Engine.H2;
         boolean batch = scrubbed.indexOf(';') >= 0 && scrubbed.indexOf(';') < scrubbed.length() - 1;
         try {
@@ -229,6 +236,30 @@ public final class SqlAnalyzer {
             LOG.trace("JSqlParser rejected statement: {}", t.toString());
             return List.of();
         }
+    }
+
+    /**
+     * Maximum parenthesis depth of a statement (scanned on scrubbed SQL, i.e. outside literals and comments);
+     * {@link Integer#MAX_VALUE} when the parentheses are unbalanced.
+     */
+    static int nestingDepth(String scrubbed) {
+        int depth = 0;
+        int max = 0;
+        for (int i = 0; i < scrubbed.length(); i++) {
+            char c = scrubbed.charAt(i);
+            if (c == '(') {
+                depth++;
+                if (depth > max) {
+                    max = depth;
+                }
+            } else if (c == ')') {
+                depth--;
+                if (depth < 0) {
+                    return Integer.MAX_VALUE;
+                }
+            }
+        }
+        return depth == 0 ? max : Integer.MAX_VALUE;
     }
 
     private static List<Statement> statementsOf(Statements all) {

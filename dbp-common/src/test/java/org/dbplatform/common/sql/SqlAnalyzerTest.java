@@ -144,7 +144,7 @@ class SqlAnalyzerTest {
                 c(Engine.OTHER, "/* only a comment */", SqlOperation.OTHER, "", "", false),
                 c(Engine.OTHER, "-- line comment only", SqlOperation.OTHER, "", "", false),
                 c(Engine.OTHER, "SELECT * FROM t WHERE (((((((((((((((((((((((((((((((((((((((((((((((", SqlOperation.SELECT, "t:R", "", false),
-                c(Engine.OTHER, "\u0000\u0001￿ SELECT 😀 FROM t", SqlOperation.OTHER, "", "", "any")
+                c(Engine.OTHER, "\u0000\u0001\uFFFF SELECT \uD83D\uDE00 FROM t", SqlOperation.OTHER, "t:R", "", false)
         );
     }
 
