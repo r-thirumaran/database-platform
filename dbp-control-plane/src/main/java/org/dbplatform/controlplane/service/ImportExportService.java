@@ -5,10 +5,11 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Instant;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import org.dbplatform.controlplane.api.dto.CredentialRequest;
 import org.dbplatform.controlplane.api.error.ApiException;
 import org.dbplatform.controlplane.domain.AccessGrant;
@@ -19,10 +20,12 @@ import org.dbplatform.controlplane.domain.Datasource;
 import org.dbplatform.controlplane.domain.DbTable;
 import org.dbplatform.controlplane.domain.Dependency;
 import org.dbplatform.controlplane.domain.Enums;
+import org.dbplatform.controlplane.domain.Ids;
 import org.dbplatform.controlplane.domain.Json;
 import org.dbplatform.controlplane.domain.Relationship;
 import org.dbplatform.controlplane.domain.Routine;
-import org.dbplatform.controlplane.domain.RoutingRule;
+import org.dbplatform.controlplane.domain.SchemaOwnership;
+import org.dbplatform.controlplane.domain.TableMigration;
 import org.dbplatform.controlplane.domain.Team;
 import org.dbplatform.controlplane.repo.AccessGrantRepository;
 import org.dbplatform.controlplane.repo.ApplicationRepository;
@@ -38,9 +41,12 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * {@code GET /export} / {@code POST /import}: the whole configuration as one JSON document. Entities are
- * exported with their ids plus {@code *Name} references so a document can be imported into another
- * control plane (upsert by name, references resolved by name first, then by id). Secrets are never exported.
+ * {@code GET /export} / {@code POST /import}: the whole configuration as one JSON document, cross-referenced
+ * <b>by name</b> ({@code team}, {@code credential}, {@code currentDatabase}, {@code targetDatabase}, {@code ownerTeam},
+ * {@code routingRules[].application/database}, {@code accessGrants[].application/datasource}, {@code collector.credential})
+ * with {@code ownership}, {@code producers}, {@code relationships} and {@code dependencies} sections — the format of
+ * {@code deploy/bootstrap/platform-config.json}. Import upserts by name, tolerates unknown fields and also accepts the
+ * {@code *Name} / {@code *Id} spellings. Secrets are never exported.
  */
 @Service
 public class ImportExportService {
@@ -75,6 +81,8 @@ public class ImportExportService {
         this.grants = grants; this.tables = tables; this.routines = routines; this.relationships = relationships; this.dependencies = dependencies;
     }
 
+    // ---- export ----------------------------------------------------------------------------------
+
     @Transactional(readOnly = true)
     public ObjectNode export() {
         Map<String, String> teamNames = new HashMap<>(), appNames = new HashMap<>(), credNames = new HashMap<>(), dbNames = new HashMap<>(), dsNames = new HashMap<>();
@@ -96,7 +104,7 @@ public class ImportExportService {
         ArrayNode an = root.putArray("applications");
         for (Application a : applicationService.list()) {
             ObjectNode n = Json.MAPPER.valueToTree(a);
-            n.put("teamName", teamNames.get(a.getTeamId()));
+            n.put("team", teamNames.get(a.getTeamId()));
             an.add(n);
         }
         ArrayNode cn = root.putArray("credentials");
@@ -104,116 +112,148 @@ public class ImportExportService {
         ArrayNode dbn = root.putArray("databases");
         for (DatabaseInstance d : databaseService.list()) {
             ObjectNode n = Json.MAPPER.valueToTree(d);
-            n.put("credentialName", credNames.get(d.getCredentialId()));
+            n.put("credential", credNames.get(d.getCredentialId()));
+            ObjectNode collector = (ObjectNode) n.get("collector");
+            if (collector != null) {
+                collector.remove("credentialId");
+                collector.put("credential", credNames.get(d.getCollector().getCredentialId()));
+            }
             dbn.add(n);
         }
         ArrayNode dsn = root.putArray("datasources");
         for (Datasource d : datasourceService.list()) {
             ObjectNode n = Json.MAPPER.valueToTree(d);
-            n.put("ownerTeamName", teamNames.get(d.getOwnerTeamId()));
-            n.put("currentDatabaseName", dbNames.get(d.getCurrentDatabaseId()));
-            n.put("targetDatabaseName", dbNames.get(d.getTargetDatabaseId()));
+            n.put("ownerTeam", teamNames.get(d.getOwnerTeamId()));
+            n.put("currentDatabase", dbNames.get(d.getCurrentDatabaseId()));
+            n.put("targetDatabase", dbNames.get(d.getTargetDatabaseId()));
             ArrayNode rules = (ArrayNode) n.get("routingRules");
             if (rules != null) for (int i = 0; i < rules.size(); i++) {
                 ObjectNode r = (ObjectNode) rules.get(i);
-                r.put("applicationName", appNames.get(d.getRoutingRules().get(i).getApplicationId()));
-                r.put("databaseName", dbNames.get(d.getRoutingRules().get(i).getDatabaseId()));
+                r.put("application", appNames.get(d.getRoutingRules().get(i).getApplicationId()));
+                r.put("database", dbNames.get(d.getRoutingRules().get(i).getDatabaseId()));
             }
             dsn.add(n);
         }
         ArrayNode gn = root.putArray("accessGrants");
         for (AccessGrant g : grants.findAll()) {
             ObjectNode n = Json.MAPPER.valueToTree(g);
-            n.put("applicationName", appNames.get(g.getApplicationId()));
-            n.put("datasourceName", dsNames.get(g.getDatasourceId()));
+            n.put("application", appNames.get(g.getApplicationId()));
+            n.put("datasource", dsNames.get(g.getDatasourceId()));
             gn.add(n);
         }
         ArrayNode on = root.putArray("ownership");
-        for (DbTable t : tableMap.values()) {
-            if (t.getOwnerTeamId() == null && t.getProducerApplicationId() == null && t.getClassification() == null && t.getDescription() == null && t.getTags().isEmpty()) continue;
-            ObjectNode n = Json.MAPPER.createObjectNode();
-            n.put("databaseName", dbNames.get(t.getDatabaseId()));
-            n.put("schema", t.getSchema());
-            n.put("name", t.getName());
-            n.put("kind", t.getKind().name());
-            n.put("ownerTeamName", teamNames.get(t.getOwnerTeamId()));
-            n.put("ownerConfirmed", t.isOwnerConfirmed());
-            n.put("ownerSource", t.getOwnerSource().name());
-            n.put("producerApplicationName", appNames.get(t.getProducerApplicationId()));
-            n.put("classification", t.getClassification() == null ? null : t.getClassification().name());
-            n.put("description", t.getDescription());
-            n.set("tags", Json.MAPPER.valueToTree(t.getTags()));
-            n.set("migration", Json.MAPPER.valueToTree(t.getMigration()));
-            on.add(n);
+        for (SchemaOwnership so : catalogue.schemaOwnerships()) {
+            ObjectNode n = on.addObject();
+            n.put("database", dbNames.get(so.getDatabaseId()));
+            n.put("schema", so.getSchema());
+            n.putNull("table");
+            n.put("team", teamNames.get(so.getTeamId()));
+            n.put("confirmed", so.isConfirmed());
+        }
+        ArrayNode pn = root.putArray("producers");
+        ArrayNode tbn = root.putArray("tables");
+        for (DbTable t : tableMap.values().stream().sorted((a, b) -> (a.getSchema() + a.getName()).compareTo(b.getSchema() + b.getName())).toList()) {
+            if (t.getOwnerTeamId() != null && t.getOwnerSource() == Enums.OwnerSource.DECLARED) {
+                ObjectNode n = on.addObject();
+                n.put("database", dbNames.get(t.getDatabaseId()));
+                n.put("schema", t.getSchema());
+                n.put("table", t.getName());
+                n.put("team", teamNames.get(t.getOwnerTeamId()));
+                n.put("confirmed", t.isOwnerConfirmed());
+            }
+            if (t.getProducerApplicationId() != null && t.getProducerSource() == Enums.OwnerSource.DECLARED) {
+                ObjectNode n = pn.addObject();
+                n.put("database", dbNames.get(t.getDatabaseId()));
+                n.put("schema", t.getSchema());
+                n.put("table", t.getName());
+                n.put("application", appNames.get(t.getProducerApplicationId()));
+            }
+            if (t.getClassification() != null || t.getDescription() != null || !t.getTags().isEmpty() || t.getMigration().getState() != Enums.MigrationState.NOT_PLANNED) {
+                ObjectNode n = tbn.addObject();
+                n.put("database", dbNames.get(t.getDatabaseId()));
+                n.put("schema", t.getSchema());
+                n.put("table", t.getName());
+                n.put("kind", t.getKind().name());
+                n.put("classification", t.getClassification() == null ? null : t.getClassification().name());
+                n.put("description", t.getDescription());
+                n.set("tags", Json.MAPPER.valueToTree(t.getTags()));
+                ObjectNode m = n.putObject("migration");
+                m.put("targetDatabase", dbNames.get(t.getMigration().getTargetDatabaseId()));
+                m.put("targetSchema", t.getMigration().getTargetSchema());
+                m.put("targetName", t.getMigration().getTargetName());
+                m.put("state", t.getMigration().getState().name());
+            }
         }
         ArrayNode rn = root.putArray("relationships");
         for (Relationship r : relationships.findAll()) {
             if (r.getSource() != Enums.RelationshipSource.DECLARED) continue;
-            ObjectNode n = Json.MAPPER.createObjectNode();
-            n.put("applicationName", appNames.get(r.getApplicationId()));
+            ObjectNode n = rn.addObject();
+            n.put("application", appNames.get(r.getApplicationId()));
+            putObjectRef(n, r.getObjectType(), r.getObjectId(), "object", tableMap, routineMap, dbNames);
             n.put("objectType", r.getObjectType().name());
-            putObjectRef(n, r.getObjectType(), r.getObjectId(), tableMap, routineMap, dbNames);
             n.put("kind", r.getKind().name());
-            rn.add(n);
+            n.put("source", "DECLARED");
+            n.put("confirmed", r.isConfirmed());
         }
         ArrayNode dn = root.putArray("dependencies");
         for (Dependency d : dependencies.findAll()) {
             if (d.getSource() != Enums.DependencySource.DECLARED) continue;
-            ObjectNode n = Json.MAPPER.createObjectNode();
+            ObjectNode n = dn.addObject();
             n.put("fromType", d.getFromType().name());
-            putObjectRef(n.putObject("from"), d.getFromType(), d.getFromId(), tableMap, routineMap, dbNames);
+            putObjectRef(n.putObject("from"), d.getFromType(), d.getFromId(), "name", tableMap, routineMap, dbNames);
             n.put("toType", d.getToType().name());
-            putObjectRef(n.putObject("to"), d.getToType(), d.getToId(), tableMap, routineMap, dbNames);
+            putObjectRef(n.putObject("to"), d.getToType(), d.getToId(), "name", tableMap, routineMap, dbNames);
             n.put("kind", d.getKind().name());
-            dn.add(n);
         }
         return root;
     }
 
-    private static void putObjectRef(ObjectNode n, Enums.ObjectType type, String id, Map<String, DbTable> tableMap, Map<String, Routine> routineMap, Map<String, String> dbNames) {
+    private static void putObjectRef(ObjectNode n, Enums.ObjectType type, String id, String nameField, Map<String, DbTable> tableMap, Map<String, Routine> routineMap, Map<String, String> dbNames) {
         if (type == Enums.ObjectType.TABLE) {
             DbTable t = tableMap.get(id);
-            if (t != null) { n.put("databaseName", dbNames.get(t.getDatabaseId())); n.put("schema", t.getSchema()); n.put("name", t.getName()); }
+            if (t != null) { n.put("database", dbNames.get(t.getDatabaseId())); n.put("schema", t.getSchema()); n.put(nameField, t.getName()); }
         } else {
             Routine r = routineMap.get(id);
-            if (r != null) { n.put("databaseName", dbNames.get(r.getDatabaseId())); n.put("schema", r.getSchema()); n.put("name", r.getName()); }
+            if (r != null) { n.put("database", dbNames.get(r.getDatabaseId())); n.put("schema", r.getSchema()); n.put(nameField, r.getName()); }
         }
     }
 
-    public record ImportResult(int teams, int applications, int credentials, int databases, int datasources, int accessGrants, int ownership, int relationships, int dependencies) {}
+    // ---- import ----------------------------------------------------------------------------------
+
+    public record ImportResult(int teams, int applications, int credentials, int databases, int datasources, int accessGrants, int ownership,
+                               int producers, int tables, int relationships, int dependencies) {}
 
     @Transactional
     public ImportResult importDocument(JsonNode doc) {
         if (doc == null || !doc.isObject()) throw new ApiException.BadRequest("import document must be a JSON object");
-        int nTeams = 0, nApps = 0, nCreds = 0, nDbs = 0, nDs = 0, nGrants = 0, nOwn = 0, nRel = 0, nDep = 0;
+        int nTeams = 0, nApps = 0, nCreds = 0, nDbs = 0, nDs = 0, nGrants = 0, nOwn = 0, nProd = 0, nTbl = 0, nRel = 0, nDep = 0;
         for (JsonNode n : arr(doc, "teams")) { teamService.upsertByName(Json.MAPPER.convertValue(n, Team.class)); nTeams++; }
-        for (JsonNode n : arr(doc, "credentials")) {
-            CredentialRequest r = Json.MAPPER.convertValue(n, CredentialRequest.class);
-            credentialService.upsertByName(r);
-            nCreds++;
-        }
+        for (JsonNode n : arr(doc, "credentials")) { credentialService.upsertByName(Json.MAPPER.convertValue(n, CredentialRequest.class)); nCreds++; }
         for (JsonNode n : arr(doc, "applications")) {
             ObjectNode o = (ObjectNode) n.deepCopy();
-            o.put("teamId", resolveId(o, "teamName", "teamId", name -> teams.findByName(name).map(Team::getId), id -> teams.existsById(id)));
+            o.put("teamId", ref(o, teamResolver(), "team", "teamName", "teamId"));
             applicationService.upsertByName(Json.MAPPER.convertValue(o, Application.class));
             nApps++;
         }
         for (JsonNode n : arr(doc, "databases")) {
             ObjectNode o = (ObjectNode) n.deepCopy();
-            o.put("credentialId", resolveId(o, "credentialName", "credentialId", name -> credentials.findByName(name).map(Credential::getId), id -> credentials.existsById(id)));
+            o.put("credentialId", ref(o, credentialResolver(), "credential", "credentialName", "credentialId"));
+            if (o.get("collector") instanceof ObjectNode collector) {
+                collector.put("credentialId", ref(collector, credentialResolver(), "credential", "credentialName", "credentialId"));
+            }
             databaseService.upsertByName(Json.MAPPER.convertValue(o, DatabaseInstance.class));
             nDbs++;
         }
         for (JsonNode n : arr(doc, "datasources")) {
             ObjectNode o = (ObjectNode) n.deepCopy();
-            o.put("ownerTeamId", resolveId(o, "ownerTeamName", "ownerTeamId", name -> teams.findByName(name).map(Team::getId), id -> teams.existsById(id)));
-            o.put("currentDatabaseId", resolveId(o, "currentDatabaseName", "currentDatabaseId", name -> databases.findByName(name).map(DatabaseInstance::getId), id -> databases.existsById(id)));
-            o.put("targetDatabaseId", resolveId(o, "targetDatabaseName", "targetDatabaseId", name -> databases.findByName(name).map(DatabaseInstance::getId), id -> databases.existsById(id)));
+            o.put("ownerTeamId", ref(o, teamResolver(), "ownerTeam", "ownerTeamName", "ownerTeamId"));
+            o.put("currentDatabaseId", ref(o, databaseResolver(), "currentDatabase", "currentDatabaseName", "currentDatabaseId"));
+            o.put("targetDatabaseId", ref(o, databaseResolver(), "targetDatabase", "targetDatabaseName", "targetDatabaseId"));
             JsonNode rules = o.get("routingRules");
             if (rules != null && rules.isArray()) for (JsonNode rn : rules) {
                 ObjectNode r = (ObjectNode) rn;
-                r.put("applicationId", resolveId(r, "applicationName", "applicationId", name -> applications.findByName(name).map(Application::getId), id -> applications.existsById(id)));
-                r.put("databaseId", resolveId(r, "databaseName", "databaseId", name -> databases.findByName(name).map(DatabaseInstance::getId), id -> databases.existsById(id)));
+                r.put("applicationId", ref(r, applicationResolver(), "application", "applicationName", "applicationId"));
+                r.put("databaseId", ref(r, databaseResolver(), "database", "databaseName", "databaseId"));
                 r.remove("id");
             }
             Datasource ds = Json.MAPPER.convertValue(o, Datasource.class);
@@ -223,64 +263,125 @@ public class ImportExportService {
         }
         for (JsonNode n : arr(doc, "accessGrants")) {
             ObjectNode o = (ObjectNode) n.deepCopy();
-            o.put("applicationId", resolveId(o, "applicationName", "applicationId", name -> applications.findByName(name).map(Application::getId), id -> applications.existsById(id)));
-            o.put("datasourceId", resolveId(o, "datasourceName", "datasourceId", name -> datasources.findByName(name).map(Datasource::getId), id -> datasources.existsById(id)));
+            o.put("applicationId", ref(o, applicationResolver(), "application", "applicationName", "applicationId"));
+            o.put("datasourceId", ref(o, datasourceResolver(), "datasource", "datasourceName", "datasourceId"));
             AccessGrant g = Json.MAPPER.convertValue(o, AccessGrant.class);
-            if (g.getApplicationId() == null || g.getDatasourceId() == null) throw new ApiException.BadRequest("accessGrant references unknown application/datasource: " + n);
+            if (g.getApplicationId() == null || g.getDatasourceId() == null) throw new ApiException.BadRequest("accessGrant references an unknown application or datasource: " + n);
             grantService.upsert(g);
             nGrants++;
         }
         for (JsonNode n : arr(doc, "ownership")) {
-            Optional<DbTable> t = findTable(n);
-            if (t.isEmpty()) continue;
-            DbTable table = t.get();
-            String owner = resolveId((ObjectNode) n, "ownerTeamName", "ownerTeamId", name -> teams.findByName(name).map(Team::getId), id -> teams.existsById(id));
-            if (owner != null) { table.setOwnerTeamId(owner); table.setOwnerSource(Enums.OwnerSource.DECLARED); table.setOwnerConfirmed(!n.has("ownerConfirmed") || n.get("ownerConfirmed").asBoolean()); }
-            String producer = resolveId((ObjectNode) n, "producerApplicationName", "producerApplicationId", name -> applications.findByName(name).map(Application::getId), id -> applications.existsById(id));
-            if (producer != null) { table.setProducerApplicationId(producer); table.setProducerSource(Enums.OwnerSource.DECLARED); }
-            if (n.hasNonNull("classification")) table.setClassification(Enums.Classification.valueOf(n.get("classification").asText()));
-            if (n.hasNonNull("description")) table.setDescription(n.get("description").asText());
-            if (n.has("tags") && n.get("tags").isArray()) table.setTags(Json.MAPPER.convertValue(n.get("tags"), Json.MAPPER.getTypeFactory().constructCollectionType(List.class, String.class)));
-            if (n.hasNonNull("migration")) table.setMigration(Json.MAPPER.convertValue(n.get("migration"), org.dbplatform.controlplane.domain.TableMigration.class));
-            tables.save(table);
+            DatabaseInstance db = databaseOf(n);
+            String teamId = ref((ObjectNode) n, teamResolver(), "team", "ownerTeamName", "ownerTeamId", "teamName", "teamId");
+            if (db == null || teamId == null) throw new ApiException.BadRequest("ownership entry references an unknown database or team: " + n);
+            boolean confirmed = !n.has("confirmed") ? !n.has("ownerConfirmed") || n.get("ownerConfirmed").asBoolean(true) : n.get("confirmed").asBoolean(true);
+            String tableName = text(n, "table", "name");
+            String schema = text(n, "schema");
+            if (tableName == null) {
+                catalogue.setSchemaOwnership(db.getId(), schema, teamId, confirmed);
+            } else {
+                DbTable t = tableOrPlaceholder(db, schema, tableName, n.path("kind").asText(null));
+                t.setOwnerTeamId(teamId); t.setOwnerSource(Enums.OwnerSource.DECLARED); t.setOwnerConfirmed(confirmed);
+                String producer = ref((ObjectNode) n, applicationResolver(), "producer", "producerApplicationName", "producerApplicationId");
+                if (producer != null) { t.setProducerApplicationId(producer); t.setProducerSource(Enums.OwnerSource.DECLARED); }
+                tables.save(t);
+            }
             nOwn++;
         }
+        for (JsonNode n : arr(doc, "producers")) {
+            DatabaseInstance db = databaseOf(n);
+            String appId = ref((ObjectNode) n, applicationResolver(), "application", "applicationName", "applicationId");
+            if (db == null || appId == null) throw new ApiException.BadRequest("producer entry references an unknown database or application: " + n);
+            DbTable t = tableOrPlaceholder(db, text(n, "schema"), text(n, "table", "name"), null);
+            t.setProducerApplicationId(appId); t.setProducerSource(Enums.OwnerSource.DECLARED);
+            tables.save(t);
+            nProd++;
+        }
+        for (JsonNode n : arr(doc, "tables")) {
+            DatabaseInstance db = databaseOf(n);
+            if (db == null) continue;
+            DbTable t = tableOrPlaceholder(db, text(n, "schema"), text(n, "table", "name"), n.path("kind").asText(null));
+            if (n.hasNonNull("classification")) t.setClassification(Enums.Classification.valueOf(n.get("classification").asText()));
+            if (n.hasNonNull("description")) t.setDescription(n.get("description").asText());
+            if (n.has("tags") && n.get("tags").isArray()) t.setTags(Json.MAPPER.convertValue(n.get("tags"), Json.MAPPER.getTypeFactory().constructCollectionType(List.class, String.class)));
+            if (n.get("migration") instanceof ObjectNode m) {
+                TableMigration tm = new TableMigration();
+                tm.setTargetDatabaseId(ref(m, databaseResolver(), "targetDatabase", "targetDatabaseName", "targetDatabaseId"));
+                tm.setTargetSchema(m.path("targetSchema").asText(null));
+                tm.setTargetName(m.path("targetName").asText(null));
+                if (m.hasNonNull("state")) tm.setState(Enums.MigrationState.valueOf(m.get("state").asText()));
+                t.setMigration(tm);
+            }
+            tables.save(t);
+            nTbl++;
+        }
         for (JsonNode n : arr(doc, "relationships")) {
-            Optional<Application> app = applications.findByName(n.path("applicationName").asText(null));
-            Enums.ObjectType type = Enums.ObjectType.valueOf(n.path("objectType").asText("TABLE"));
-            Optional<String> objectId = type == Enums.ObjectType.TABLE ? findTable(n).map(DbTable::getId) : findRoutine(n).map(Routine::getId);
-            if (app.isEmpty() || objectId.isEmpty()) continue;
+            String appId = ref((ObjectNode) n, applicationResolver(), "application", "applicationName", "applicationId");
+            DatabaseInstance db = databaseOf(n);
+            if (appId == null || db == null) throw new ApiException.BadRequest("relationship references an unknown application or database: " + n);
+            Enums.ObjectType type = Enums.ObjectType.valueOf(n.path("objectType").asText("TABLE").toUpperCase());
+            String objectName = text(n, "object", "name", "table", "routine");
+            String objectId = type == Enums.ObjectType.TABLE ? tableOrPlaceholder(db, text(n, "schema"), objectName, null).getId()
+                    : routineOrPlaceholder(db, text(n, "schema"), objectName).getId();
             Relationship r = new Relationship();
-            r.setApplicationId(app.get().getId()); r.setObjectType(type); r.setObjectId(objectId.get());
-            r.setKind(Enums.RelationshipKind.valueOf(n.path("kind").asText("READS")));
-            catalogue.declareRelationship(r);
+            r.setApplicationId(appId); r.setObjectType(type); r.setObjectId(objectId);
+            r.setKind(Enums.RelationshipKind.valueOf(n.path("kind").asText("READS").toUpperCase()));
+            Relationship saved = catalogue.declareRelationship(r);
+            if (n.has("confirmed")) catalogue.setRelationshipConfirmed(saved.getId(), n.get("confirmed").asBoolean(true));
             nRel++;
         }
         for (JsonNode n : arr(doc, "dependencies")) {
-            Enums.ObjectType ft = Enums.ObjectType.valueOf(n.path("fromType").asText("ROUTINE"));
-            Enums.ObjectType tt = Enums.ObjectType.valueOf(n.path("toType").asText("TABLE"));
-            Optional<String> from = ft == Enums.ObjectType.TABLE ? findTable(n.get("from")).map(DbTable::getId) : findRoutine(n.get("from")).map(Routine::getId);
-            Optional<String> to = tt == Enums.ObjectType.TABLE ? findTable(n.get("to")).map(DbTable::getId) : findRoutine(n.get("to")).map(Routine::getId);
-            if (from.isEmpty() || to.isEmpty()) continue;
+            Enums.ObjectType ft = Enums.ObjectType.valueOf(n.path("fromType").asText("ROUTINE").toUpperCase());
+            Enums.ObjectType tt = Enums.ObjectType.valueOf(n.path("toType").asText("TABLE").toUpperCase());
+            DatabaseInstance fdb = databaseOf(n.get("from")), tdb = databaseOf(n.get("to"));
+            if (fdb == null || tdb == null) continue;
+            String from = ft == Enums.ObjectType.TABLE ? tableOrPlaceholder(fdb, text(n.get("from"), "schema"), text(n.get("from"), "name", "table"), null).getId()
+                    : routineOrPlaceholder(fdb, text(n.get("from"), "schema"), text(n.get("from"), "name", "routine")).getId();
+            String to = tt == Enums.ObjectType.TABLE ? tableOrPlaceholder(tdb, text(n.get("to"), "schema"), text(n.get("to"), "name", "table"), null).getId()
+                    : routineOrPlaceholder(tdb, text(n.get("to"), "schema"), text(n.get("to"), "name", "routine")).getId();
             Dependency d = new Dependency();
-            d.setFromType(ft); d.setFromId(from.get()); d.setToType(tt); d.setToId(to.get());
-            d.setKind(Enums.DependencyKind.valueOf(n.path("kind").asText("REFERENCES")));
+            d.setFromType(ft); d.setFromId(from); d.setToType(tt); d.setToId(to);
+            d.setKind(Enums.DependencyKind.valueOf(n.path("kind").asText("REFERENCES").toUpperCase()));
             catalogue.declareDependency(d);
             nDep++;
         }
-        return new ImportResult(nTeams, nApps, nCreds, nDbs, nDs, nGrants, nOwn, nRel, nDep);
+        return new ImportResult(nTeams, nApps, nCreds, nDbs, nDs, nGrants, nOwn, nProd, nTbl, nRel, nDep);
     }
 
-    private Optional<DbTable> findTable(JsonNode n) {
-        if (n == null || n.isNull()) return Optional.empty();
-        return databases.findByName(n.path("databaseName").asText(null))
-                .flatMap(db -> tables.findByDatabaseIdAndSchemaIgnoreCaseAndNameIgnoreCase(db.getId(), n.path("schema").asText(null), n.path("name").asText(null)));
+    // ---- helpers ---------------------------------------------------------------------------------
+
+    private DbTable tableOrPlaceholder(DatabaseInstance db, String schema, String name, String kind) {
+        if (schema == null || name == null) throw new ApiException.BadRequest("schema and table name are required (" + db.getName() + ")");
+        DbTable t = tables.findByDatabaseIdAndSchemaIgnoreCaseAndNameIgnoreCase(db.getId(), schema, name).orElseGet(() -> {
+            DbTable n = new DbTable();
+            n.setId(Ids.newId()); n.setDatabaseId(db.getId()); n.setSchema(schema); n.setName(name);
+            n.setDiscovered(true); n.setFirstSeenAt(Instant.now());
+            return n;
+        });
+        if (kind != null && !kind.isBlank()) t.setKind(Enums.TableKind.valueOf(kind.toUpperCase()));
+        catalogue.applySchemaOwnership(t);
+        return tables.save(t);
     }
 
-    private Optional<Routine> findRoutine(JsonNode n) {
-        if (n == null || n.isNull()) return Optional.empty();
-        return databases.findByName(n.path("databaseName").asText(null))
-                .flatMap(db -> routines.findByDatabaseIdAndSchemaIgnoreCaseAndNameIgnoreCase(db.getId(), n.path("schema").asText(null), n.path("name").asText(null)));
+    private Routine routineOrPlaceholder(DatabaseInstance db, String schema, String name) {
+        if (schema == null || name == null) throw new ApiException.BadRequest("schema and routine name are required (" + db.getName() + ")");
+        return routines.findByDatabaseIdAndSchemaIgnoreCaseAndNameIgnoreCase(db.getId(), schema, name).orElseGet(() -> {
+            Routine n = new Routine();
+            n.setId(Ids.newId()); n.setDatabaseId(db.getId()); n.setSchema(schema); n.setName(name);
+            n.setKind(Enums.RoutineKind.PROCEDURE); n.setDiscovered(true); n.setFirstSeenAt(Instant.now());
+            return routines.save(n);
+        });
+    }
+
+    private DatabaseInstance databaseOf(JsonNode n) {
+        if (n == null || n.isNull()) return null;
+        String id = ref((ObjectNode) n, databaseResolver(), "database", "databaseName", "databaseId");
+        return id == null ? null : databases.findById(id).orElse(null);
+    }
+
+    private static String text(JsonNode n, String... fields) {
+        for (String f : fields) if (n.hasNonNull(f) && !n.get(f).asText().isBlank()) return n.get(f).asText();
+        return null;
     }
 
     private static Iterable<JsonNode> arr(JsonNode doc, String field) {
@@ -288,18 +389,24 @@ public class ImportExportService {
         return n != null && n.isArray() ? n : List.of();
     }
 
-    /** Resolves a reference by name first, then by id; returns null when neither resolves. */
-    private static String resolveId(ObjectNode o, String nameField, String idField, java.util.function.Function<String, Optional<String>> byName,
-                                    java.util.function.Predicate<String> idExists) {
-        String name = o.hasNonNull(nameField) ? o.get(nameField).asText() : null;
-        if (name != null && !name.isBlank()) {
-            Optional<String> id = byName.apply(name);
-            if (id.isPresent()) return id.get();
-        }
-        String id = o.hasNonNull(idField) ? o.get(idField).asText() : null;
-        return id != null && !id.isBlank() && idExists.test(id) ? id : null;
-    }
+    private record Resolver(Function<String, Optional<String>> byName, Predicate<String> idExists) {}
 
-    /** Exposed for tests / seed. */
-    Map<String, Object> asMap(JsonNode n) { return Json.MAPPER.convertValue(n, LinkedHashMap.class); }
+    private Resolver teamResolver() { return new Resolver(name -> teams.findByName(name).map(Team::getId), teams::existsById); }
+    private Resolver applicationResolver() { return new Resolver(name -> applications.findByName(name).map(Application::getId), applications::existsById); }
+    private Resolver credentialResolver() { return new Resolver(name -> credentials.findByName(name).map(Credential::getId), credentials::existsById); }
+    private Resolver databaseResolver() { return new Resolver(name -> databases.findByName(name).map(DatabaseInstance::getId), databases::existsById); }
+    private Resolver datasourceResolver() { return new Resolver(name -> datasources.findByName(name).map(Datasource::getId), datasources::existsById); }
+
+    /** Resolves a reference by name (any of the given fields, in order), then by id; null when nothing resolves. */
+    private static String ref(ObjectNode o, Resolver resolver, String... fields) {
+        for (String f : fields) {
+            if (!o.hasNonNull(f)) continue;
+            String v = o.get(f).asText();
+            if (v.isBlank()) continue;
+            Optional<String> byName = resolver.byName().apply(v);
+            if (byName.isPresent()) return byName.get();
+            if (resolver.idExists().test(v)) return v;
+        }
+        return null;
+    }
 }

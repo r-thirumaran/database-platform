@@ -130,7 +130,7 @@ public class PostgresDictionaryCrawler implements DictionaryCrawler {
         return out;
     }
 
-    static String triggerEvent(int tgtype) {
+    public static String triggerEvent(int tgtype) {
         List<String> ev = new ArrayList<>();
         if ((tgtype & 4) != 0) ev.add("INSERT");
         if ((tgtype & 8) != 0) ev.add("DELETE");

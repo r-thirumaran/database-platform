@@ -55,11 +55,16 @@ final class Conversions {
             case byte[] b -> hex(b);
             case LocalDate d -> d.toString();
             case LocalTime t -> formatTime(t);
-            case LocalDateTime ldt -> Timestamp.valueOf(ldt).toString();
-            case OffsetDateTime odt -> Timestamp.valueOf(odt.toLocalDateTime()).toString() + offsetId(odt.getOffset());
+            case LocalDateTime ldt -> formatTimestamp(ldt);
+            case OffsetDateTime odt -> formatTimestamp(odt.toLocalDateTime()) + offsetId(odt.getOffset());
             case OffsetTime ot -> formatTime(ot.toLocalTime()) + offsetId(ot.getOffset());
             default -> v.toString();
         };
+    }
+
+    /** JDBC escape format {@code yyyy-MM-dd HH:mm:ss[.fffffffff]} without a trailing {@code .0}. */
+    private static String formatTimestamp(LocalDateTime ldt) {
+        return ldt.toLocalDate() + " " + formatTime(ldt.toLocalTime());
     }
 
     private static String formatTime(LocalTime t) {

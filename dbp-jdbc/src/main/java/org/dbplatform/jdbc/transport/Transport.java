@@ -220,13 +220,41 @@ public final class Transport implements AutoCloseable {
         }
     }
 
-    private static boolean isTerminal(MessageType request, MessageType response) throws ProtocolException {
-        return switch (response) {
-            case OK, ERROR, HELLO_OK, PONG, PREPARED, EXECUTE_DONE, BATCH_RESULT, SAVEPOINT_SET -> true;
-            case ROWS -> request == MessageType.FETCH;
-            case RESULT_SET_HEADER, UPDATE_COUNT, OUT_PARAMS, GENERATED_KEYS -> false;
-            default -> throw new ProtocolException("unexpected frame " + response + " in response to " + request);
+    /** The terminal frame type each request type is answered with (besides ERROR). */
+    static MessageType expectedTerminal(MessageType request) {
+        return switch (request) {
+            case HELLO -> MessageType.HELLO_OK;
+            case PING -> MessageType.PONG;
+            case PREPARE -> MessageType.PREPARED;
+            case EXECUTE, METADATA -> MessageType.EXECUTE_DONE;
+            case FETCH -> MessageType.ROWS;
+            case EXECUTE_BATCH -> MessageType.BATCH_RESULT;
+            case SET_SAVEPOINT -> MessageType.SAVEPOINT_SET;
+            default -> MessageType.OK;
         };
+    }
+
+    private static boolean isTerminal(MessageType request, MessageType response) throws ProtocolException {
+        if (response == MessageType.ERROR) {
+            return true;
+        }
+        MessageType expected = expectedTerminal(request);
+        if (response == expected) {
+            return true;
+        }
+        boolean streaming = request == MessageType.EXECUTE || request == MessageType.METADATA;
+        if (streaming) {
+            switch (response) {
+                case RESULT_SET_HEADER, ROWS, UPDATE_COUNT, OUT_PARAMS, GENERATED_KEYS -> {
+                    return false;
+                }
+                default -> {
+                    // fall through to the violation below
+                }
+            }
+        }
+        throw new ProtocolException("unexpected frame " + response + " in response to " + request
+                + " (expected " + expected + ")");
     }
 
     private SQLNonTransientConnectionException ioFailure(IOException e) {

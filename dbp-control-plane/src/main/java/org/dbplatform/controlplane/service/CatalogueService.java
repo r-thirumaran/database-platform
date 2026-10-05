@@ -30,6 +30,8 @@ import org.dbplatform.controlplane.repo.DbTableRepository;
 import org.dbplatform.controlplane.repo.DependencyRepository;
 import org.dbplatform.controlplane.repo.RelationshipRepository;
 import org.dbplatform.controlplane.repo.RoutineRepository;
+import org.dbplatform.controlplane.repo.SchemaOwnershipRepository;
+import org.dbplatform.controlplane.domain.SchemaOwnership;
 import org.dbplatform.controlplane.repo.TeamRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -46,13 +48,47 @@ public class CatalogueService {
     private final TeamRepository teams;
     private final ApplicationRepository applications;
     private final DatabaseRepository databases;
+    private final SchemaOwnershipRepository schemaOwnership;
 
     public CatalogueService(DbTableRepository tables, DbColumnRepository columns, RoutineRepository routines,
                             DependencyRepository dependencies, RelationshipRepository relationships, TeamRepository teams,
-                            ApplicationRepository applications, DatabaseRepository databases) {
+                            ApplicationRepository applications, DatabaseRepository databases, SchemaOwnershipRepository schemaOwnership) {
         this.tables = tables; this.columns = columns; this.routines = routines; this.dependencies = dependencies;
         this.relationships = relationships; this.teams = teams; this.applications = applications; this.databases = databases;
+        this.schemaOwnership = schemaOwnership;
     }
+
+    /** Applies the schema-wide ownership default (if any) to a table that has no owner yet. */
+    public void applySchemaOwnership(DbTable t) {
+        if (t.getOwnerTeamId() != null) return;
+        schemaOwnership.findByDatabaseIdAndSchemaIgnoreCase(t.getDatabaseId(), t.getSchema()).ifPresent(so -> {
+            t.setOwnerTeamId(so.getTeamId());
+            t.setOwnerSource(Enums.OwnerSource.DECLARED);
+            t.setOwnerConfirmed(so.isConfirmed());
+        });
+    }
+
+    /** Records a schema-wide ownership rule and applies it to the existing tables of the schema. */
+    public int setSchemaOwnership(String databaseId, String schema, String teamId, boolean confirmed) {
+        databases.findById(databaseId).orElseThrow(() -> new ApiException.NotFound("Database", databaseId));
+        teams.findById(teamId).orElseThrow(() -> new ApiException.BadRequest("Unknown teamId '" + teamId + "'"));
+        SchemaOwnership so = schemaOwnership.findByDatabaseIdAndSchemaIgnoreCase(databaseId, schema).orElseGet(() -> {
+            SchemaOwnership n = new SchemaOwnership();
+            n.setId(Ids.newId()); n.setDatabaseId(databaseId); n.setSchema(schema);
+            return n;
+        });
+        so.setTeamId(teamId);
+        so.setConfirmed(confirmed);
+        schemaOwnership.save(so);
+        List<DbTable> list = tables.findByDatabaseIdAndSchemaIgnoreCase(databaseId, schema);
+        for (DbTable t : list) {
+            t.setOwnerTeamId(teamId); t.setOwnerSource(Enums.OwnerSource.DECLARED); t.setOwnerConfirmed(confirmed);
+        }
+        tables.saveAll(list);
+        return list.size();
+    }
+
+    public List<SchemaOwnership> schemaOwnerships() { return schemaOwnership.findAll(); }
 
     // ---- tables ----------------------------------------------------------------------------------
 
@@ -107,14 +143,7 @@ public class CatalogueService {
     }
 
     public int bulkOwnership(String databaseId, String schema, String teamId) {
-        databases.findById(databaseId).orElseThrow(() -> new ApiException.NotFound("Database", databaseId));
-        teams.findById(teamId).orElseThrow(() -> new ApiException.BadRequest("Unknown teamId '" + teamId + "'"));
-        List<DbTable> list = tables.findByDatabaseIdAndSchemaIgnoreCase(databaseId, schema);
-        for (DbTable t : list) {
-            t.setOwnerTeamId(teamId); t.setOwnerSource(Enums.OwnerSource.DECLARED); t.setOwnerConfirmed(true);
-        }
-        tables.saveAll(list);
-        return list.size();
+        return setSchemaOwnership(databaseId, schema, teamId, true);
     }
 
     @Transactional(readOnly = true)
@@ -182,6 +211,7 @@ public class CatalogueService {
         t.setDiscovered(true);
         t.setFirstSeenAt(Instant.now());
         t.setLastSeenAt(Instant.now());
+        applySchemaOwnership(t);
         return tables.save(t);
     }
 

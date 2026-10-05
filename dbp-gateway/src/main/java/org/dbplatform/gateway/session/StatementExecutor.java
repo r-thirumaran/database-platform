@@ -49,6 +49,7 @@ import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.OffsetTime;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -118,15 +119,19 @@ public final class StatementExecutor {
                 owns = true;
             }
             boolean retained = false;
+            List<Warning> warnings;
             try {
                 applyOptions(st, opt);
                 if (st instanceof PreparedStatement ps) {
-                    bindParams(ps, req.params());
-                    if (ps instanceof CallableStatement cs) {
+                    Set<Integer> outIndexes = Set.of();
+                    if (ps instanceof CallableStatement cs && !req.outParams().isEmpty()) {
+                        outIndexes = new HashSet<>();
                         for (Execute.OutParam op : req.outParams()) {
                             registerOut(cs, op);
+                            outIndexes.add(op.index());
                         }
                     }
+                    bindParams(ps, req.params(), outIndexes);
                 }
                 boolean hasResultSet;
                 if (st instanceof PreparedStatement ps) {
@@ -206,13 +211,15 @@ public final class StatementExecutor {
                 if (wantsKeys) {
                     writeGeneratedKeys(st);
                 }
-                List<Warning> warnings = collectWarnings(st);
-                Messages.write(out, new ExecuteDone(warnings));
+                warnings = collectWarnings(st);
             } finally {
                 if (owns && !retained) {
                     LogicalSession.closeQuietly(st);
                 }
             }
+            // release before the terminal frame so the pin is gone when the client sees EXECUTE_DONE
+            session.maybeRelease();
+            Messages.write(out, new ExecuteDone(warnings));
         } catch (SQLException e) {
             failure = e;
             throw e;
@@ -487,6 +494,7 @@ public final class StatementExecutor {
                     rows += cnt;
                 }
             }
+            session.maybeRelease();
             Messages.write(out, new BatchResult(counts, warnings));
         } catch (SQLException e) {
             failure = e;
@@ -543,6 +551,7 @@ public final class StatementExecutor {
                 // some drivers return result sets without a statement
             }
             streamResultSet(st, rs, st != null, false, ProtocolConstants.DIRECT_STATEMENT_ID, ProtocolConstants.DEFAULT_FETCH_SIZE);
+            session.maybeRelease();
             Messages.write(out, ExecuteDone.NO_WARNINGS);
         } finally {
             session.maybeRelease();
@@ -629,8 +638,20 @@ public final class StatementExecutor {
     }
 
     private void bindParams(PreparedStatement ps, List<Object> params) throws SQLException {
+        bindParams(ps, params, Set.of());
+    }
+
+    /**
+     * Binds the parameters. A NULL (or typed null) at an index registered as OUT parameter is the placeholder the
+     * driver sends for a pure OUT parameter and is not bound; INOUT parameters carry a real value and are bound.
+     */
+    private void bindParams(PreparedStatement ps, List<Object> params, Set<Integer> registeredOut) throws SQLException {
         for (int i = 0; i < params.size(); i++) {
-            bind(ps, i + 1, params.get(i));
+            Object v = params.get(i);
+            if ((v == null || v instanceof TypedNull) && registeredOut.contains(i + 1)) {
+                continue;
+            }
+            bind(ps, i + 1, v);
         }
     }
 

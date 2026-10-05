@@ -157,11 +157,6 @@ public final class DbpCallableStatement extends DbpPreparedStatement implements 
         registerOutParameter(parameterIndex, vendorType(sqlType), typeName);
     }
 
-    @Override
-    public void clearParameters() throws SQLException {
-        super.clearParameters();
-    }
-
     // ---------------------------------------------------------------- OUT values
 
     private Object out(int parameterIndex) throws SQLException {

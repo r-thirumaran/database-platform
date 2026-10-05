@@ -13,7 +13,7 @@ public class ConfigVersionService {
     public ConfigVersionService(ConfigVersionRepository repo) { this.repo = repo; }
 
     @Transactional(propagation = Propagation.REQUIRED)
-    public void bump() { repo.bump(); }
+    public void bump() { repo.bump(java.time.Instant.now()); }
 
     @Transactional(readOnly = true)
     public long current() {

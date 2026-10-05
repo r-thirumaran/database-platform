@@ -24,10 +24,11 @@ public class CollectorConnections {
     }
 
     public Connection open(DatabaseInstance db) throws SQLException {
-        if (db.getCredentialId() == null) {
+        String credentialId = db.getCollector().getCredentialId() != null ? db.getCollector().getCredentialId() : db.getCredentialId();
+        if (credentialId == null) {
             throw new ApiException.Conflict("Database '" + db.getName() + "' has no credential configured");
         }
-        CredentialService.Material m = credentials.material(db.getCredentialId(), "collector:" + db.getName());
+        CredentialService.Material m = credentials.material(credentialId, "collector:" + db.getName());
         Properties p = new Properties();
         for (Map.Entry<String, String> e : db.getJdbcProperties().entrySet()) p.setProperty(e.getKey(), e.getValue());
         if (m.username() != null) p.setProperty("user", m.username());

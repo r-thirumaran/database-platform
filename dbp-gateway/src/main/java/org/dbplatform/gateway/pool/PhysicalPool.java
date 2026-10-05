@@ -43,6 +43,8 @@ public final class PhysicalPool {
     private volatile String engineName;
     private volatile Engine engine;
     private volatile String defaultSchema;
+    private volatile String defaultCatalog;
+    private volatile boolean baselineCaptured;
     private final Map<String, String> baselineClientInfo;
 
     PhysicalPool(PoolSettings settings, String gatewayId) throws SQLException {
@@ -152,9 +154,33 @@ public final class PhysicalPool {
         return createdAt;
     }
 
-    /** Default schema of the pool user as reported by the driver (nullable, cached). */
+    /** Default schema of the pool user as reported by the driver (nullable, captured on the first borrow). */
     public String defaultSchema() {
         return defaultSchema;
+    }
+
+    /** Default catalog of the pool user (nullable, captured on the first borrow). */
+    public String defaultCatalog() {
+        return defaultCatalog;
+    }
+
+    private void captureBaseline(Connection c) {
+        synchronized (this) {
+            if (baselineCaptured) {
+                return;
+            }
+            try {
+                defaultSchema = c.getSchema();
+            } catch (SQLException | AbstractMethodError | RuntimeException e) {
+                defaultSchema = null;
+            }
+            try {
+                defaultCatalog = c.getCatalog();
+            } catch (SQLException | AbstractMethodError | RuntimeException e) {
+                defaultCatalog = null;
+            }
+            baselineCaptured = true;
+        }
     }
 
     /** Client info entries every physical connection carries when no session info is set. */
@@ -176,6 +202,9 @@ public final class PhysicalPool {
         try {
             Connection c = ds.getConnection();
             pinnedSessions.incrementAndGet();
+            if (!baselineCaptured) {
+                captureBaseline(c);
+            }
             return c;
         } catch (SQLException e) {
             String state = e.getSQLState() == null ? STATE_UNABLE : e.getSQLState();
@@ -218,11 +247,6 @@ public final class PhysicalPool {
                 String product = computed.get("databaseProductName");
                 engine = ServerProperties.detectEngine(product, settings.engineHint());
                 engineName = ServerProperties.engineName(product, settings.engineHint());
-                try {
-                    defaultSchema = c.getSchema();
-                } catch (SQLException | AbstractMethodError | RuntimeException e) {
-                    defaultSchema = null;
-                }
                 serverProperties = Collections.unmodifiableMap(computed);
                 return serverProperties;
             } finally {

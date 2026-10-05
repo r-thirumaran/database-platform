@@ -24,6 +24,7 @@ import org.dbplatform.controlplane.domain.QueryStat;
 import org.dbplatform.controlplane.domain.Relationship;
 import org.dbplatform.controlplane.domain.Routine;
 import org.dbplatform.controlplane.domain.Team;
+import org.dbplatform.controlplane.repo.AccessGrantRepository;
 import org.dbplatform.controlplane.repo.ApplicationRepository;
 import org.dbplatform.controlplane.repo.DatabaseRepository;
 import org.dbplatform.controlplane.repo.DbTableRepository;
@@ -44,15 +45,15 @@ import org.springframework.transaction.annotation.Transactional;
 @Transactional(readOnly = true)
 public class ImpactService {
     public record Target(String type, String id, String label) {}
-    public record DirectConsumer(Application application, Team team, Enums.RelationshipKind kind, long queryCount, Instant lastSeenAt, boolean confirmed) {}
-    public record IndirectConsumer(Application application, Team team, RoutineRef viaRoutine, TableRef viaView, Enums.RelationshipKind kind, long queryCount, Instant lastSeenAt) {}
-    public record Impact(Target target, Team owner, Application producer, List<DirectConsumer> directConsumers, List<IndirectConsumer> indirectConsumers,
+    public record Impact(Target target, Team owner, Application producer, List<SummaryService.Consumer> directConsumers, List<SummaryService.Consumer> indirectConsumers,
                          List<RoutineRef> routines, List<RoutineRef> triggers, List<TableRef> dependentViews, List<TableRef> foreignKeyDependents,
                          List<Team> teamsAffected, StatsService.QueryStats queryStats, double riskScore, List<String> riskFactors,
                          DbColumn column, List<StatsService.QueryStatView> queriesReferencingColumn) {}
+    public record ApplicationImpact(Application application, Team team, boolean hasRoutingRule, long queryCount, Instant lastSeenAt) {}
+    public record TableImpactRow(TableRef table, Team owner, List<SummaryService.Consumer> consumers, long queryCount, double riskScore, List<String> riskFactors) {}
     public record DatasourceImpact(Target target, Datasource datasource, DatabaseInstance currentDatabase, DatabaseInstance targetDatabase,
-                                   List<Application> consumers, List<Team> teamsAffected, List<TableImpactRow> tables, double riskScore, List<String> riskFactors) {}
-    public record TableImpactRow(TableRef table, Team owner, int consumers, int teams, double riskScore, List<String> riskFactors) {}
+                                   List<ApplicationImpact> applications, List<Team> teamsAffected, List<TableImpactRow> tables,
+                                   List<RoutineRef> routines, List<RoutineRef> triggers, double riskScore, List<String> riskFactors) {}
 
     private final CatalogueService catalogue;
     private final SummaryService summaries;
@@ -66,13 +67,15 @@ public class ImpactService {
     private final RelationshipRepository relationships;
     private final DatabaseRepository databases;
     private final QueryStatRepository queryStats;
+    private final AccessGrantRepository grants;
 
     public ImpactService(CatalogueService catalogue, SummaryService summaries, StatsService stats, DatasourceService datasourceService,
                          TeamRepository teams, ApplicationRepository applications, DbTableRepository tables, RoutineRepository routines,
-                         DependencyRepository dependencies, RelationshipRepository relationships, DatabaseRepository databases, QueryStatRepository queryStats) {
+                         DependencyRepository dependencies, RelationshipRepository relationships, DatabaseRepository databases, QueryStatRepository queryStats,
+                         AccessGrantRepository grants) {
         this.catalogue = catalogue; this.summaries = summaries; this.stats = stats; this.datasourceService = datasourceService; this.teams = teams;
         this.applications = applications; this.tables = tables; this.routines = routines; this.dependencies = dependencies;
-        this.relationships = relationships; this.databases = databases; this.queryStats = queryStats;
+        this.relationships = relationships; this.databases = databases; this.queryStats = queryStats; this.grants = grants;
     }
 
     public Impact table(String tableId) {
@@ -93,16 +96,11 @@ public class ImpactService {
         Map<String, Team> teamCache = new HashMap<>();
 
         // 1. direct relationships
-        Map<String, DirectConsumer> direct = new LinkedHashMap<>();
-        Map<String, IndirectConsumer> indirect = new LinkedHashMap<>();
+        Map<String, SummaryService.Consumer> direct = new LinkedHashMap<>();
+        Map<String, SummaryService.Consumer> indirect = new LinkedHashMap<>();
         for (SummaryService.Consumer c : summaries.consumersOf(t.getId())) {
-            if (c.viaRoutine() == null) {
-                String k = c.application().getId() + "|" + c.kind();
-                direct.merge(k, new DirectConsumer(c.application(), c.team(), c.kind(), c.queryCount(), c.lastSeenAt(), c.confirmed()),
-                        (a, b) -> new DirectConsumer(a.application(), a.team(), a.kind(), a.queryCount() + b.queryCount(), later(a.lastSeenAt(), b.lastSeenAt()), a.confirmed() || b.confirmed()));
-            } else {
-                indirect.put(c.application().getId() + "|" + c.kind() + "|" + c.viaRoutine().id(), new IndirectConsumer(c.application(), c.team(), c.viaRoutine(), null, c.kind(), c.queryCount(), c.lastSeenAt()));
-            }
+            if (c.viaRoutine() == null) direct.put(c.application().getId() + "|" + c.kind(), c);
+            else indirect.put(c.application().getId() + "|" + c.kind() + "|" + c.viaRoutine().id(), c);
         }
         // 2. routines / triggers referencing the table, then the applications calling them
         List<RoutineRef> routs = new ArrayList<>(), trigs = new ArrayList<>();
@@ -141,7 +139,8 @@ public class ImpactService {
                 if (app == null) continue;
                 Team team = app.getTeamId() == null ? null : teamCache.computeIfAbsent(app.getTeamId(), k -> teams.findById(k).orElse(null));
                 String k = app.getId() + "|READS|view:" + vid;
-                if (!indirect.containsKey(k)) indirect.put(k, new IndirectConsumer(app, team, null, TableRef.of(v), Enums.RelationshipKind.READS, rel.getQueryCount(), rel.getLastSeenAt()));
+                if (!indirect.containsKey(k)) indirect.put(k, new SummaryService.Consumer(app, team, Enums.RelationshipKind.READS, rel.getSource(), rel.getConfidence(),
+                        rel.isConfirmed(), rel.getQueryCount(), rel.getLastSeenAt(), null, TableRef.of(v), false));
             }
         }
         for (Dependency d : dependencies.findByFromId(t.getId())) {
@@ -167,7 +166,8 @@ public class ImpactService {
                 Team team = app.getTeamId() == null ? null : teamCache.computeIfAbsent(app.getTeamId(), k -> teams.findById(k).orElse(null));
                 Enums.RelationshipKind kind = catalogue.expandRoutineToTables(rid).getOrDefault(t.getId(), Enums.RelationshipKind.READS);
                 String k = app.getId() + "|" + kind + "|" + rid;
-                if (!indirect.containsKey(k)) indirect.put(k, new IndirectConsumer(app, team, RoutineRef.of(r), null, kind, rel.getQueryCount(), rel.getLastSeenAt()));
+                if (!indirect.containsKey(k)) indirect.put(k, new SummaryService.Consumer(app, team, kind, rel.getSource(), rel.getConfidence(), rel.isConfirmed(),
+                        rel.getQueryCount(), rel.getLastSeenAt(), RoutineRef.of(r), null, false));
             }
         }
         // 4. foreign keys pointing at it
@@ -231,35 +231,62 @@ public class ImpactService {
         Datasource ds = datasourceService.get(datasourceId);
         DatabaseInstance cur = ds.getCurrentDatabaseId() == null ? null : databases.findById(ds.getCurrentDatabaseId()).orElse(null);
         DatabaseInstance tgt = ds.getTargetDatabaseId() == null ? null : databases.findById(ds.getTargetDatabaseId()).orElse(null);
-        Map<String, Application> consumers = new LinkedHashMap<>();
+        Map<String, ApplicationImpact> apps = new LinkedHashMap<>();
         Map<String, Team> teamsAffected = new LinkedHashMap<>();
         List<TableImpactRow> rows = new ArrayList<>();
+        Map<String, RoutineRef> routs = new LinkedHashMap<>(), trigs = new LinkedHashMap<>();
+        Set<String> ruled = new java.util.HashSet<>();
+        ds.getRoutingRules().forEach(r -> { if (r.getApplicationId() != null && r.isEnabled()) ruled.add(r.getApplicationId()); });
         double maxRisk = 0;
         if (cur != null) {
             for (DbTable t : tables.findByDatabaseIdOrderBySchemaAscNameAsc(cur.getId())) {
                 Impact i = analyse(t, null);
-                Set<String> apps = new LinkedHashSet<>();
-                i.directConsumers().forEach(c -> { apps.add(c.application().getId()); consumers.put(c.application().getId(), c.application()); if (c.team() != null) teamsAffected.put(c.team().getId(), c.team()); });
-                i.indirectConsumers().forEach(c -> { apps.add(c.application().getId()); consumers.put(c.application().getId(), c.application()); if (c.team() != null) teamsAffected.put(c.team().getId(), c.team()); });
-                Set<String> tms = new LinkedHashSet<>();
-                i.teamsAffected().forEach(x -> tms.add(x.getId()));
-                rows.add(new TableImpactRow(TableRef.of(t), i.owner(), apps.size(), tms.size(), i.riskScore(), i.riskFactors()));
+                List<SummaryService.Consumer> consumers = new ArrayList<>(i.directConsumers());
+                consumers.addAll(i.indirectConsumers());
+                long count = 0;
+                for (SummaryService.Consumer c : consumers) {
+                    count += c.queryCount();
+                    Application a = c.application();
+                    ApplicationImpact prev = apps.get(a.getId());
+                    boolean hasRule = ruled.contains(a.getId()) || ds.getRoutingRules().stream().anyMatch(r -> r.isEnabled() && r.getTag() != null && a.getTags().contains(r.getTag()));
+                    apps.put(a.getId(), new ApplicationImpact(a, c.team(), hasRule, (prev == null ? 0 : prev.queryCount()) + c.queryCount(), later(prev == null ? null : prev.lastSeenAt(), c.lastSeenAt())));
+                    if (c.team() != null) teamsAffected.put(c.team().getId(), c.team());
+                }
+                i.routines().forEach(r -> routs.putIfAbsent(r.id(), r));
+                i.triggers().forEach(r -> trigs.putIfAbsent(r.id(), r));
+                rows.add(new TableImpactRow(TableRef.of(t), i.owner(), consumers, count, i.riskScore(), i.riskFactors()));
                 maxRisk = Math.max(maxRisk, i.riskScore());
             }
+        }
+        // applications granted on the datasource count as affected even without observed traffic
+        for (org.dbplatform.controlplane.domain.AccessGrant g : grants.findByDatasourceId(ds.getId())) {
+            if (!g.isEnabled() || apps.containsKey(g.getApplicationId())) continue;
+            applications.findById(g.getApplicationId()).ifPresent(a -> {
+                Team team = a.getTeamId() == null ? null : teams.findById(a.getTeamId()).orElse(null);
+                boolean hasRule = ruled.contains(a.getId()) || ds.getRoutingRules().stream().anyMatch(r -> r.isEnabled() && r.getTag() != null && a.getTags().contains(r.getTag()));
+                apps.put(a.getId(), new ApplicationImpact(a, team, hasRule, 0, null));
+                if (team != null) teamsAffected.put(team.getId(), team);
+            });
         }
         rows.sort(Comparator.comparingDouble(TableImpactRow::riskScore).reversed());
         List<String> factors = new ArrayList<>();
         double score = 0;
-        if (!teamsAffected.isEmpty()) { score += Math.min(teamsAffected.size(), 5) / 5.0 * 0.4; factors.add(teamsAffected.size() + " consuming team" + (teamsAffected.size() > 1 ? "s" : "")); }
-        if (!consumers.isEmpty()) { score += Math.min(consumers.size(), 10) / 10.0 * 0.2; factors.add(consumers.size() + " consuming application" + (consumers.size() > 1 ? "s" : "")); }
-        score += maxRisk * 0.4;
+        if (cur != null && tgt != null && cur.getEngine() != tgt.getEngine()) { score += 0.2; factors.add("engine change " + cur.getEngine() + " \u2192 " + tgt.getEngine()); }
+        if (!teamsAffected.isEmpty()) { score += Math.min(teamsAffected.size(), 5) / 5.0 * 0.3; factors.add(teamsAffected.size() + " consuming team" + (teamsAffected.size() > 1 ? "s" : "")); }
+        if (!apps.isEmpty()) { score += Math.min(apps.size(), 10) / 10.0 * 0.15; factors.add(apps.size() + " consuming application" + (apps.size() > 1 ? "s" : "")); }
+        long withoutRule = apps.values().stream().filter(a -> !a.hasRoutingRule()).count();
+        if (tgt != null && withoutRule > 0) factors.add(withoutRule + " application" + (withoutRule > 1 ? "s" : "") + " without a routing rule to the target");
+        if (!trigs.isEmpty()) { score += 0.1; factors.add(trigs.size() + " trigger" + (trigs.size() > 1 ? "s" : "")); }
+        if (!routs.isEmpty()) { score += 0.05; factors.add(routs.size() + " routine" + (routs.size() > 1 ? "s" : "")); }
+        score += maxRisk * 0.2;
         if (maxRisk > 0) factors.add("highest table risk " + maxRisk);
         if (ds.getState() == Enums.DatasourceState.MIGRATING) factors.add("datasource is MIGRATING");
         List<Team> tl = new ArrayList<>(teamsAffected.values());
         tl.sort(Comparator.comparing(Team::getName));
-        List<Application> al = new ArrayList<>(consumers.values());
-        al.sort(Comparator.comparing(Application::getName));
-        return new DatasourceImpact(new Target("DATASOURCE", ds.getId(), ds.getName()), ds, cur, tgt, al, tl, rows, round(Math.min(1.0, score)), factors);
+        List<ApplicationImpact> al = new ArrayList<>(apps.values());
+        al.sort(Comparator.comparing(a -> a.application().getName()));
+        return new DatasourceImpact(new Target("DATASOURCE", ds.getId(), ds.getName()), ds, cur, tgt, al, tl, rows,
+                new ArrayList<>(routs.values()), new ArrayList<>(trigs.values()), round(Math.min(1.0, score)), factors);
     }
 
     private static Instant later(Instant a, Instant b) { return a == null ? b : b == null ? a : a.isAfter(b) ? a : b; }

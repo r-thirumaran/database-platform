@@ -10,6 +10,8 @@ public class CollectorConfig {
     private int runtimeIntervalSeconds = 15;
     private List<String> schemas = new ArrayList<>();
     private boolean auditTrail = false;
+    /** Optional credential used by the collectors instead of the database's platform credential. */
+    private String credentialId;
 
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -21,4 +23,6 @@ public class CollectorConfig {
     public void setSchemas(List<String> schemas) { this.schemas = schemas == null ? new ArrayList<>() : schemas; }
     public boolean isAuditTrail() { return auditTrail; }
     public void setAuditTrail(boolean auditTrail) { this.auditTrail = auditTrail; }
+    public String getCredentialId() { return credentialId; }
+    public void setCredentialId(String credentialId) { this.credentialId = credentialId; }
 }

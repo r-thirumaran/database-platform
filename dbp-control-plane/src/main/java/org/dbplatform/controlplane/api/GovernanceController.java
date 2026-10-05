@@ -33,5 +33,9 @@ public class GovernanceController {
         }
     }
 
-    @PostMapping("/evaluate") public GovernanceService.EvaluationResult evaluate() { return governance.evaluate(); }
+    @PostMapping("/evaluate")
+    public Map<String, Object> evaluate() {
+        GovernanceService.EvaluationResult r = governance.evaluate();
+        return Map.of("ok", true, "violations", r.open(), "resolved", r.resolved(), "inferredProducers", r.inferredProducers());
+    }
 }

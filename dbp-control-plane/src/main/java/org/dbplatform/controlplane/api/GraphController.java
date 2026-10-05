@@ -23,8 +23,9 @@ public class GraphController {
     @GetMapping("/graph")
     public GraphService.Graph graph(@RequestParam(required = false) String root, @RequestParam(required = false, defaultValue = "2") int depth,
                                     @RequestParam(required = false) String include, @RequestParam(required = false) String edgeKinds,
-                                    @RequestParam(required = false, defaultValue = "500") int limit) {
-        return graph.graph(root, Math.max(0, depth), split(include), split(edgeKinds), Math.max(1, limit));
+                                    @RequestParam(required = false, defaultValue = "500") int limit,
+                                    @RequestParam(required = false, defaultValue = "false") boolean includeIndirect) {
+        return graph.graph(root, Math.max(0, depth), split(include), split(edgeKinds), Math.max(1, limit), includeIndirect);
     }
 
     @GetMapping("/impact/table/{id}") public ImpactService.Impact table(@PathVariable String id) { return impact.table(id); }

@@ -35,7 +35,8 @@ class TelemetryApiTest extends AbstractApiTest {
         // catalogue: CUSTOMER table, ORDERS table (via import of ownership is not needed), routine PLACE_ORDER with dictionary dependencies
         // tables are created through the catalogue by discovery of a first event (placeholders) – seed two real ones through import
         JsonNode imported = postJson("/api/v1/import", Map.of("teams", List.of(), "ownership", List.of()), 200);
-        assertThat(imported.get("teams").asInt()).isZero();
+        assertThat(imported.get("ok").asBoolean()).isTrue();
+        assertThat(imported.get("imported").get("teams").asInt()).isZero();
         // discover tables by telemetry first
         QueryEvent e1 = QueryEvent.builder().eventId(uniq("evt")).timestamp(Instant.now()).gatewayId("gw-1").sessionId("s-1").applicationId(appId).application(appName)
                 .datasource(dsName).databaseId(dbId).engine(Engine.ORACLE).sqlHash("h1").sqlNormalized("SELECT * FROM sales.customer WHERE id = ?").operation(SqlOperation.SELECT)
@@ -93,7 +94,7 @@ class TelemetryApiTest extends AbstractApiTest {
         assertThat(calls).hasSize(1);
         assertThat(calls.get(0).get("kind").asText()).isEqualTo("CALLS");
         assertThat(calls.get(0).get("queryCount").asLong()).isEqualTo(2);
-        JsonNode viaOrders = getJson("/api/v1/relationships?applicationId=" + appId + "&objectId=" + ordersTbl.get("id").asText(), 200);
+        JsonNode viaOrders = getJson("/api/v1/relationships?applicationId=" + appId + "&objectId=" + ordersTbl.get("id").asText() + "&kind=WRITES", 200);
         assertThat(viaOrders).hasSize(1);
         assertThat(viaOrders.get(0).get("kind").asText()).isEqualTo("WRITES");
         assertThat(viaOrders.get(0).get("viaRoutineId").asText()).isEqualTo(routineId);
@@ -123,9 +124,15 @@ class TelemetryApiTest extends AbstractApiTest {
         assertThat(appSummary.get("calls").get(0).get("id").asText()).isEqualTo(routineId);
         assertThat(appSummary.get("writes").toString()).contains(ordersTbl.get("id").asText());
         JsonNode rsum = getJson("/api/v1/routines/" + routineId + "/summary", 200);
-        assertThat(rsum.get("callers").get(0).get("id").asText()).isEqualTo(appId);
+        assertThat(rsum.get("callers").get(0).get("application").get("id").asText()).isEqualTo(appId);
+        assertThat(rsum.get("callers").get(0).get("kind").asText()).isEqualTo("CALLS");
+        assertThat(rsum.get("callers").get(0).get("source").asText()).isEqualTo("GATEWAY");
+        assertThat(rsum.get("callers").get(0).get("confidence").asDouble()).isEqualTo(1.0);
         assertThat(rsum.get("tables").size()).isEqualTo(3);
-        assertThat(rsum.get("dependencies").get(0).get("fromLabel").asText()).isEqualTo("SALES.ORDER_PKG.PLACE_ORDER");
+        assertThat(rsum.get("dependencies")).hasSize(2);
+        assertThat(rsum.get("dependencies").get(0).get("fromName").asText()).isEqualTo("SALES.ORDER_PKG.PLACE_ORDER");
+        assertThat(rsum.get("referencedBy")).isEmpty();
+        assertThat(summary.get("queryStats").has("avgDurationMs") && summary.get("queryStats").has("errors24h")).isTrue();
         // DECLARED-only delete rule for dependencies
         JsonNode deps = getJson("/api/v1/dependencies?fromId=" + routineId, 200);
         assertThat(deps).hasSize(2);

@@ -1,6 +1,7 @@
 # dbp-gateway static configuration (used when DBP_CONTROL_PLANE_URL is not set).
-# Point DBP_GATEWAY_CONFIG at a file with this shape. ${ENV_VAR} placeholders are substituted
-# from the environment (use ${ENV_VAR:-default} for a default value).
+# Point DBP_GATEWAY_CONFIG at a file with this shape. Values may contain environment placeholders:
+# a dollar sign followed by the variable name in curly braces, optionally with ":-default" inside the
+# braces (see the apiKey of orders-service below).
 
 gatewayId: gw-local
 

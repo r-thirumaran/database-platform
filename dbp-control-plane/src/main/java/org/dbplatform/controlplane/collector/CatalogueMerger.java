@@ -54,6 +54,7 @@ public class CatalogueMerger {
             if (ti.lastDdl != null) t.setLastDdlAt(ti.lastDdl);
             if (t.getDescription() == null && ti.comment != null && !ti.comment.isBlank()) t.setDescription(ti.comment);
             t.setLastSeenAt(now);
+            catalogue.applySchemaOwnership(t);
             t = tables.save(t);
             idsByKey.put(ti.ref().key(), t.getId());
             mergeColumns(t, ti.columns);

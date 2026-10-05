@@ -20,6 +20,7 @@ import org.dbplatform.controlplane.repo.DbTableRepository;
 import org.dbplatform.controlplane.repo.DependencyRepository;
 import org.dbplatform.controlplane.repo.RelationshipRepository;
 import org.dbplatform.controlplane.repo.RoutineRepository;
+import org.dbplatform.controlplane.repo.SchemaOwnershipRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -35,13 +36,15 @@ public class DatabaseService {
     private final RelationshipRepository relationships;
     private final ConfigVersionService configVersion;
     private final CollectorConnections connections;
+    private final SchemaOwnershipRepository schemaOwnership;
 
     public DatabaseService(DatabaseRepository databases, CredentialRepository credentials, DatasourceRepository datasources,
                            DbTableRepository tables, RoutineRepository routines, DependencyRepository dependencies,
-                           RelationshipRepository relationships, ConfigVersionService configVersion, CollectorConnections connections) {
+                           RelationshipRepository relationships, ConfigVersionService configVersion, CollectorConnections connections,
+                           SchemaOwnershipRepository schemaOwnership) {
         this.databases = databases; this.credentials = credentials; this.datasources = datasources; this.tables = tables;
         this.routines = routines; this.dependencies = dependencies; this.relationships = relationships;
-        this.configVersion = configVersion; this.connections = connections;
+        this.configVersion = configVersion; this.connections = connections; this.schemaOwnership = schemaOwnership;
     }
 
     @Transactional(readOnly = true)
@@ -88,6 +91,7 @@ public class DatabaseService {
         }
         routines.deleteByDatabaseId(id);
         tables.deleteByDatabaseId(id);
+        schemaOwnership.deleteByDatabaseId(id);
         databases.delete(d);
         configVersion.bump();
     }
@@ -125,6 +129,9 @@ public class DatabaseService {
     private void copy(DatabaseInstance in, DatabaseInstance d) {
         if (in.getCredentialId() != null && credentials.findById(in.getCredentialId()).isEmpty()) {
             throw new ApiException.BadRequest("Unknown credentialId '" + in.getCredentialId() + "'");
+        }
+        if (in.getCollector().getCredentialId() != null && credentials.findById(in.getCollector().getCredentialId()).isEmpty()) {
+            throw new ApiException.BadRequest("Unknown collector.credentialId '" + in.getCollector().getCredentialId() + "'");
         }
         d.setName(in.getName());
         d.setEngine(in.getEngine());

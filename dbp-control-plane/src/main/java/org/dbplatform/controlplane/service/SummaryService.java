@@ -67,8 +67,9 @@ public class SummaryService {
         this.relationships = relationships; this.grants = grants;
     }
 
-    public record Consumer(Application application, Team team, RelationshipKind kind, long queryCount, Instant lastSeenAt,
-                           RoutineRef viaRoutine, Enums.RelationshipSource source, boolean confirmed, boolean stale) {}
+    /** ConsumerEntry of the contract (plus {@code viaView} for consumers reading through a view and {@code stale}). */
+    public record Consumer(Application application, Team team, RelationshipKind kind, Enums.RelationshipSource source, double confidence,
+                           boolean confirmed, long queryCount, Instant lastSeenAt, RoutineRef viaRoutine, TableRef viaView, boolean stale) {}
 
     public record TeamSummary(Team team, List<Application> applications, List<TableRef> ownedTables, List<TableRef> consumedTables,
                               List<TableRef> producedTables, List<DatasourceRef> datasourcesOwned) {}
@@ -84,11 +85,12 @@ public class SummaryService {
                                List<RoutineRef> routines, List<RoutineRef> triggers, List<TableRef> foreignKeysOut, List<TableRef> foreignKeysIn,
                                List<TableRef> views, StatsService.QueryStats queryStats, List<StatsService.QueryStatView> topQueries) {}
 
-    public record ResolvedDependency(String id, ObjectType fromType, String fromId, String fromLabel, ObjectType toType, String toId, String toLabel,
+    /** Dependency plus resolved {@code fromName} / {@code toName}. */
+    public record ResolvedDependency(String id, ObjectType fromType, String fromId, String fromName, ObjectType toType, String toId, String toName,
                                      DependencyKind kind, Enums.DependencySource source, double confidence, Instant firstSeenAt, Instant lastSeenAt) {}
 
-    public record RoutineSummary(Routine routine, List<ResolvedDependency> dependencies, List<Application> callers, List<TableRef> tables,
-                                 DbTable triggerTable, Team ownerTeam, DatabaseInstance database) {}
+    public record RoutineSummary(Routine routine, List<ResolvedDependency> dependencies, List<ResolvedDependency> referencedBy, List<Consumer> callers,
+                                 List<TableRef> tables, DbTable triggerTable, Team ownerTeam, DatabaseInstance database) {}
 
     public TeamSummary team(String id) {
         Team team = teamService.get(id);
@@ -210,8 +212,10 @@ public class SummaryService {
             long count = r.getQueryCount() + (prev == null ? 0 : prev.queryCount());
             Instant last = prev != null && prev.lastSeenAt() != null && (r.getLastSeenAt() == null || prev.lastSeenAt().isAfter(r.getLastSeenAt())) ? prev.lastSeenAt() : r.getLastSeenAt();
             boolean confirmed = r.isConfirmed() || r.getSource() == Enums.RelationshipSource.DECLARED || (prev != null && prev.confirmed());
-            Enums.RelationshipSource src = prev == null ? r.getSource() : prev.source() == Enums.RelationshipSource.DECLARED ? prev.source() : r.getSource();
-            agg.put(key, new Consumer(app, team, r.getKind(), count, last, via, src, confirmed, last == null || last.isBefore(staleBefore)));
+            // the most trustworthy source wins for display (DECLARED > GATEWAY/AUDIT > PROXY > SESSION)
+            Enums.RelationshipSource src = prev == null || Enums.confidenceOf(r.getSource()) > Enums.confidenceOf(prev.source()) || r.getSource() == Enums.RelationshipSource.DECLARED ? r.getSource() : prev.source();
+            double confidence = Math.max(Enums.confidenceOf(r.getSource()), prev == null ? 0 : prev.confidence());
+            agg.put(key, new Consumer(app, team, r.getKind(), src, confidence, confirmed, count, last, via, null, last == null || last.isBefore(staleBefore)));
         }
         return agg.values().stream().sorted(Comparator.comparingLong(Consumer::queryCount).reversed()).toList();
     }
@@ -220,14 +224,13 @@ public class SummaryService {
         Routine r = catalogue.getRoutine(id);
         List<ResolvedDependency> deps = new ArrayList<>();
         for (Dependency d : dependencies.findByFromId(id)) deps.add(resolve(d));
-        for (Dependency d : dependencies.findByToId(id)) deps.add(resolve(d));
-        Set<String> callerIds = new LinkedHashSet<>();
-        relationships.findByObjectId(id).forEach(rel -> callerIds.add(rel.getApplicationId()));
-        List<Application> callers = callerIds.stream().map(applications::findById).flatMap(java.util.Optional::stream).sorted(Comparator.comparing(Application::getName)).toList();
+        List<ResolvedDependency> referencedBy = new ArrayList<>();
+        for (Dependency d : dependencies.findByToId(id)) referencedBy.add(resolve(d));
+        List<Consumer> callers = consumersOf(id);
         List<TableRef> tbls = catalogue.tablesByIds(catalogue.expandRoutineToTables(id).keySet()).stream().sorted(byName()).map(TableRef::of).toList();
         DbTable trigTable = r.getTriggerTableId() == null ? null : tables.findById(r.getTriggerTableId()).orElse(null);
         Team owner = r.getOwnerTeamId() == null ? null : teams.findById(r.getOwnerTeamId()).orElse(null);
-        return new RoutineSummary(r, deps, callers, tbls, trigTable, owner, databases.findById(r.getDatabaseId()).orElse(null));
+        return new RoutineSummary(r, deps, referencedBy, callers, tbls, trigTable, owner, databases.findById(r.getDatabaseId()).orElse(null));
     }
 
     private ResolvedDependency resolve(Dependency d) {

@@ -390,3 +390,14 @@ CREATE TABLE collector_state (
     sessions_seen       INTEGER NOT NULL DEFAULT 0,
     audit_cursor        TIMESTAMP WITH TIME ZONE
 );
+
+-- Schema-wide ownership defaults (import "ownership" rows with table = null, POST /tables/bulk-ownership);
+-- applied to tables of that schema discovered later by crawlers or telemetry.
+CREATE TABLE schema_ownership (
+    id           VARCHAR(36) PRIMARY KEY,
+    database_id  VARCHAR(36) NOT NULL,
+    schema_name  VARCHAR(128) NOT NULL,
+    team_id      VARCHAR(36) NOT NULL,
+    confirmed    BOOLEAN NOT NULL DEFAULT TRUE,
+    CONSTRAINT uq_schema_ownership UNIQUE (database_id, schema_name)
+);

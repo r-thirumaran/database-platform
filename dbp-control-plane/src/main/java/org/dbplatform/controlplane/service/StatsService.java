@@ -72,11 +72,13 @@ public class StatsService {
 
     // ---- DTOs ------------------------------------------------------------------------------------
 
-    public record QueryStats(long count24h, long count7d, Instant lastSeenAt) {}
+    public record QueryStats(long count24h, long count7d, Instant lastSeenAt, double avgDurationMs, long errors24h) {}
     public record ConnectionStats(int proxy, int gatewayLogical, int gatewayPhysical) {}
     public record ComponentOnline(Enums.ComponentType componentType, String componentId, Instant lastHeartbeat, boolean healthy) {}
+    /** The overview's connection block uses {@code proxyActive} (contract §11) while ConnectionStats elsewhere uses {@code proxy}. */
+    public record OverviewConnections(int proxyActive, int gatewayLogical, int gatewayPhysical) {}
     public record Overview(long databases, long datasources, long applications, long teams, long tables, long routines,
-                           ConnectionStats connections, long queriesLastHour, long unownedTables, long crossTeamAccesses, long violations,
+                           OverviewConnections connections, long queriesLastHour, long unownedTables, long crossTeamAccesses, long violations,
                            List<ComponentOnline> componentsOnline) {}
     public record GroupedConnections(String key, int proxy, int gatewayLogical, int gatewayPhysical) {}
     public record QueryStatView(String sqlHash, String sqlNormalized, String operation, String applicationId, String applicationName,
@@ -98,8 +100,9 @@ public class StatsService {
         }
         List<ComponentOnline> online = components.list().stream()
                 .map(c -> new ComponentOnline(c.componentType(), c.componentId(), c.lastHeartbeat(), c.healthy())).toList();
+        ConnectionStats totals = connectionTotals();
         return new Overview(databases.count(), datasources.count(), applications.count(), teams.count(), tables.count(), routines.count(),
-                connectionTotals(), rawQueries.countByReceivedAtGreaterThanEqual(Instant.now().minus(Duration.ofHours(1))),
+                new OverviewConnections(totals.proxy(), totals.gatewayLogical(), totals.gatewayPhysical()), rawQueries.countByReceivedAtGreaterThanEqual(Instant.now().minus(Duration.ofHours(1))),
                 tables.countByOwnerTeamIdIsNull(), crossTeam, violations.countByStatus(Enums.ViolationStatus.OPEN), online);
     }
 
@@ -250,15 +253,19 @@ public class StatsService {
     public QueryStats queryStatsFor(java.util.function.Predicate<QueryStat> filter) {
         Instant since7d = Instant.now().minus(Duration.ofDays(7)).truncatedTo(java.time.temporal.ChronoUnit.HOURS);
         Instant since24h = Instant.now().minus(Duration.ofHours(24));
-        long c24 = 0, c7 = 0;
+        long c24 = 0, c7 = 0, dur24 = 0, err24 = 0;
         Instant last = null;
         for (QueryStat s : queryStats.findByBucketStartGreaterThanEqual(since7d)) {
             if (!filter.test(s)) continue;
             c7 += s.getExecCount();
-            if (!s.getBucketStart().isBefore(since24h.truncatedTo(java.time.temporal.ChronoUnit.HOURS))) c24 += s.getExecCount();
+            if (!s.getBucketStart().isBefore(since24h.truncatedTo(java.time.temporal.ChronoUnit.HOURS))) {
+                c24 += s.getExecCount();
+                dur24 += s.getTotalDurationMs();
+                err24 += s.getErrorCount();
+            }
             if (s.getLastSeenAt() != null && (last == null || s.getLastSeenAt().isAfter(last))) last = s.getLastSeenAt();
         }
-        return new QueryStats(c24, c7, last);
+        return new QueryStats(c24, c7, last, c24 == 0 ? 0 : Math.round(dur24 * 100.0 / c24) / 100.0, err24);
     }
 
     public QueryStats queryStatsForTable(String tableId) {

@@ -53,7 +53,7 @@ public class CatalogueController {
         String db = body.get("databaseId"), schema = body.get("schema"), team = body.get("teamId");
         if (db == null || schema == null || team == null) throw new ApiException.BadRequest("databaseId, schema and teamId are required");
         int n = catalogue.bulkOwnership(db, schema, team);
-        return Map.of("updated", n);
+        return Map.of("ok", true, "updated", n);
     }
 
     // ---- routines

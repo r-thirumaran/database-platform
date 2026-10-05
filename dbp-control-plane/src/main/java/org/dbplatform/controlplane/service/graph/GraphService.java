@@ -67,6 +67,11 @@ public class GraphService {
     }
 
     public Graph graph(String root, int depth, Set<String> include, Set<String> edgeKinds, int limit) {
+        return graph(root, depth, include, edgeKinds, limit, false);
+    }
+
+    /** @param includeIndirect also emit application → table edges derived through a routine ({@code viaRoutineId} set) */
+    public Graph graph(String root, int depth, Set<String> include, Set<String> edgeKinds, int limit, boolean includeIndirect) {
         Set<String> includeTypes = new HashSet<>();
         for (String inc : include == null || include.isEmpty() ? DEFAULT_INCLUDE : include) {
             String t = inc.trim().toLowerCase(Locale.ROOT);
@@ -78,7 +83,7 @@ public class GraphService {
 
         Map<String, Node> nodes = new LinkedHashMap<>();
         List<Edge> edges = new ArrayList<>();
-        build(nodes, edges);
+        build(nodes, edges, includeIndirect);
 
         // filter by node type and edge kind
         nodes.values().removeIf(n -> !includeTypes.contains(n.type().toLowerCase(Locale.ROOT)));
@@ -127,7 +132,7 @@ public class GraphService {
 
     public static String nodeId(String type, String refId) { return type.toLowerCase(Locale.ROOT) + ":" + refId; }
 
-    private void build(Map<String, Node> nodes, List<Edge> edges) {
+    private void build(Map<String, Node> nodes, List<Edge> edges, boolean includeIndirect) {
         Map<String, Team> teamMap = new HashMap<>();
         for (Team t : teams.findAll()) {
             teamMap.put(t.getId(), t);
@@ -170,6 +175,7 @@ public class GraphService {
         Map<String, Relationship> aggRel = new LinkedHashMap<>();
         for (Relationship r : relationships.findAll()) {
             countPerObject.merge(r.getObjectId(), r.getQueryCount(), Long::sum);
+            if (r.getViaRoutineId() != null && !includeIndirect) continue;
             String key = r.getApplicationId() + "|" + r.getObjectType() + "|" + r.getObjectId() + "|" + r.getKind() + "|" + r.getViaRoutineId();
             Relationship prev = aggRel.get(key);
             if (prev == null) {
@@ -237,8 +243,6 @@ public class GraphService {
         c.setViaRoutineId(r.getViaRoutineId()); c.setConfidence(r.getConfidence());
         return c;
     }
-
-    private static int edgeSeq = 0;
 
     private static Edge edge(String from, String to, String kind, Map<String, Object> attrs) {
         return new Edge(kind.toLowerCase(Locale.ROOT) + ":" + from + ">" + to, from, to, kind, attrs);

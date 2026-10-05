@@ -18,7 +18,6 @@ import org.slf4j.LoggerFactory;
 import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.SQLClientInfoException;
 import java.sql.SQLException;
 import java.sql.SQLNonTransientConnectionException;
 import java.sql.SQLRecoverableException;
@@ -295,7 +294,7 @@ public final class LogicalSession {
         try {
             c.setClientInfo(name, value);
             appliedClientInfo.add(name);
-        } catch (SQLClientInfoException | SQLException | RuntimeException e) {
+        } catch (SQLException | RuntimeException e) {
             LOG.trace("setClientInfo({}) not accepted: {}", name, e.toString());
         }
         if (pool.engine() == Engine.ORACLE) {
@@ -304,7 +303,7 @@ public final class LogicalSession {
                 try {
                     c.setClientInfo(mapped, value);
                     appliedClientInfo.add(mapped);
-                } catch (SQLClientInfoException | SQLException | RuntimeException e) {
+                } catch (SQLException | RuntimeException e) {
                     LOG.trace("setClientInfo({}) not accepted: {}", mapped, e.toString());
                 }
             }
@@ -344,7 +343,7 @@ public final class LogicalSession {
     }
 
     /** Unconditionally returns the physical connection to its pool ({@code evict} discards a broken one). */
-    public void release(boolean evict) {
+    public synchronized void release(boolean evict) {
         Connection c = physical;
         PhysicalPool pool = pinnedPool;
         if (c == null) {
@@ -367,6 +366,22 @@ public final class LogicalSession {
                     c.setAutoCommit(true);
                 } catch (SQLException | RuntimeException e) {
                     LOG.debug("setAutoCommit(true) on release failed, evicting: {}", e.toString());
+                    evict = true;
+                }
+            }
+            if (!evict && settings.schema() != null && pool.defaultSchema() != null) {
+                try {
+                    c.setSchema(pool.defaultSchema()); // HikariCP only resets the schema when one is configured
+                } catch (SQLException | RuntimeException e) {
+                    LOG.debug("schema reset on release failed, evicting: {}", e.toString());
+                    evict = true;
+                }
+            }
+            if (!evict && settings.catalog() != null && pool.defaultCatalog() != null) {
+                try {
+                    c.setCatalog(pool.defaultCatalog());
+                } catch (SQLException | RuntimeException e) {
+                    LOG.debug("catalog reset on release failed, evicting: {}", e.toString());
                     evict = true;
                 }
             }
@@ -393,7 +408,7 @@ public final class LogicalSession {
         for (String name : appliedClientInfo) {
             try {
                 c.setClientInfo(name, pool.baselineClientInfo().get(name));
-            } catch (SQLClientInfoException | SQLException | RuntimeException ignored) {
+            } catch (SQLException | RuntimeException ignored) {
                 // best effort
             }
         }
@@ -700,7 +715,7 @@ public final class LogicalSession {
     // ------------------------------------------------------------------ lifecycle
 
     /** Closes the logical session: rollback if needed, reset the physical connection and return it to the pool. */
-    public void close() {
+    public synchronized void close() {
         if (closed) {
             return;
         }
