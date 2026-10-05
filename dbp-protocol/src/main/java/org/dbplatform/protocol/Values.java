@@ -81,7 +81,7 @@ public final class Values {
             // java.sql.Timestamp/Date/Time extend java.util.Date: test them first.
             case java.sql.Timestamp ts -> encodeTimestamp(out, ts.toLocalDateTime());
             case java.sql.Date d -> encodeDate(out, d.toLocalDate());
-            case java.sql.Time t -> encodeTime(out, t.toLocalTime());
+            case java.sql.Time t -> encodeTime(out, toLocalTime(t));
             case java.util.Date d -> encodeTimestamp(out, LocalDateTime.ofInstant(d.toInstant(), ZoneId.systemDefault()));
             case LocalDate d -> encodeDate(out, d);
             case LocalTime t -> encodeTime(out, t);
@@ -320,7 +320,7 @@ public final class Values {
             case STRING -> rs.getString(column);
             case BYTES -> rs.getBytes(column);
             case DATE -> rs.getDate(column);
-            case TIME -> rs.getTime(column);
+            case TIME -> getLocalTimeOrFallback(rs, column);
             case TIMESTAMP -> rs.getTimestamp(column);
             case TIMESTAMP_TZ -> getObjectOrFallback(rs, column, OffsetDateTime.class);
             case TIME_TZ -> getObjectOrFallback(rs, column, OffsetTime.class);
@@ -340,10 +340,36 @@ public final class Values {
             // and let encode() choose the tag from the runtime type (system default zone).
             if (type == OffsetTime.class) {
                 java.sql.Time t = rs.getTime(column);
-                return t == null ? null : t.toLocalTime().atOffset(ZoneId.systemDefault().getRules().getOffset(Instant.now()));
+                return t == null ? null : toLocalTime(t).atOffset(ZoneId.systemDefault().getRules().getOffset(Instant.now()));
             }
             java.sql.Timestamp ts = rs.getTimestamp(column);
             return ts == null ? null : OffsetDateTime.ofInstant(ts.toInstant(), ZoneId.systemDefault());
         }
+    }
+
+    /**
+     * Reads a TIME column as {@link LocalTime}. {@code getObject(column, LocalTime.class)} is tried first (full
+     * precision where the physical driver supports {@code java.time}); drivers without that support fall back to
+     * {@code getTime}, converted through the instant so that the millisecond part survives.
+     */
+    private static Object getLocalTimeOrFallback(ResultSet rs, int column) throws SQLException {
+        try {
+            return rs.getObject(column, LocalTime.class);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException e) {
+            java.sql.Time t = rs.getTime(column);
+            return t == null ? null : toLocalTime(t);
+        }
+    }
+
+    /**
+     * {@code java.sql.Time} carries a full epoch-millisecond instant, but {@link java.sql.Time#toLocalTime()} is
+     * built from the legacy calendar fields only (hour, minute, second) and silently drops the milliseconds.
+     * Converting through the instant in the default zone keeps them.
+     *
+     * @param t a {@code java.sql.Time}
+     * @return the wall-clock time including its millisecond part
+     */
+    public static LocalTime toLocalTime(java.sql.Time t) {
+        return Instant.ofEpochMilli(t.getTime()).atZone(ZoneId.systemDefault()).toLocalTime();
     }
 }

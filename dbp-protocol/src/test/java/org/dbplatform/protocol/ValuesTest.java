@@ -302,6 +302,54 @@ class ValuesTest {
     }
 
     @Test
+    void sqlTimeKeepsItsMilliseconds() throws ProtocolException {
+        // java.sql.Time.toLocalTime() is built from the legacy calendar fields and drops the millisecond part;
+        // the encoder must go through the instant so that 10:11:12.345 arrives as 10:11:12.345
+        java.sql.Time t = new java.sql.Time(java.sql.Timestamp.valueOf("2020-06-15 10:11:12.345").getTime());
+        assertThat(t.toLocalTime()).as("precondition: the legacy bridge truncates").isEqualTo(LocalTime.of(10, 11, 12));
+        assertThat(tagOf(t)).isEqualTo(ValueTag.TIME);
+        assertThat(roundTrip(t)).isEqualTo(LocalTime.of(10, 11, 12, 345_000_000));
+        assertThat(Values.toLocalTime(t)).isEqualTo(LocalTime.of(10, 11, 12, 345_000_000));
+        // whole seconds are unaffected
+        assertThat(roundTrip(java.sql.Time.valueOf("23:59:59"))).isEqualTo(LocalTime.of(23, 59, 59));
+        assertThat(roundTrip(new java.sql.Time(java.sql.Timestamp.valueOf("2020-06-15 00:00:00.001").getTime())))
+                .isEqualTo(LocalTime.of(0, 0, 0, 1_000_000));
+    }
+
+    @Test
+    void encodeColumnReadsTimeAsLocalTimeAndKeepsMillisOnTheLegacyFallback() throws Exception {
+        LocalTime precise = LocalTime.of(10, 11, 12, 123_456_789);
+        java.sql.Time legacy = new java.sql.Time(java.sql.Timestamp.valueOf("2020-06-15 10:11:12.345").getTime());
+
+        // physical driver with java.time support: getObject(col, LocalTime.class) wins, nanosecond precision
+        Map<Integer, Object> cells = new java.util.HashMap<>();
+        cells.put(1, precise);
+        cells.put(2, null);
+        ResultSet modern = fakeResultSet(cells, true);
+        ProtocolOutput out = new ProtocolOutput();
+        Values.encodeColumn(out, modern, 1, ValueTag.TIME);
+        Values.encodeColumn(out, modern, 2, ValueTag.TIME);
+        ProtocolInput in = new ProtocolInput(out.toByteArray());
+        assertThat(in.readValue()).isEqualTo(precise);
+        assertThat(in.readValue()).isNull();
+        in.expectEnd();
+
+        // legacy driver: getObject(int, Class) throws SQLFeatureNotSupportedException, getTime() is used instead
+        // and its millisecond part must survive
+        cells = new java.util.HashMap<>();
+        cells.put(1, legacy);
+        cells.put(2, null);
+        ResultSet old = fakeResultSet(cells, false);
+        out = new ProtocolOutput();
+        Values.encodeColumn(out, old, 1, ValueTag.TIME);
+        Values.encodeColumn(out, old, 2, ValueTag.TIME);
+        in = new ProtocolInput(out.toByteArray());
+        assertThat(in.readValue()).isEqualTo(LocalTime.of(10, 11, 12, 345_000_000));
+        assertThat(in.readValue()).isNull();
+        in.expectEnd();
+    }
+
+    @Test
     void encodeColumnUsesTheGetterMatchingTheTagAndHonoursWasNull() throws Exception {
         Map<Integer, Object> cells = new java.util.HashMap<>();
         cells.put(1, 42);
@@ -339,11 +387,22 @@ class ValuesTest {
 
     /** Minimal ResultSet stand-in: getXxx(column) returns the map value; wasNull() reflects the last read. */
     private static ResultSet fakeResultSet(Map<Integer, Object> columns) {
+        return fakeResultSet(columns, true);
+    }
+
+    /**
+     * @param javaTime whether {@code getObject(int, Class)} is supported; when {@code false} it throws
+     *                 {@link java.sql.SQLFeatureNotSupportedException} like a pre-JDBC-4.2 driver
+     */
+    private static ResultSet fakeResultSet(Map<Integer, Object> columns, boolean javaTime) {
         final boolean[] wasNull = {false};
         InvocationHandler h = (proxy, method, args) -> {
             String name = method.getName();
             if (name.equals("wasNull")) {
                 return wasNull[0];
+            }
+            if (!javaTime && name.equals("getObject") && args != null && args.length == 2 && args[1] instanceof Class<?>) {
+                throw new java.sql.SQLFeatureNotSupportedException("getObject(int, Class) not supported");
             }
             if (name.startsWith("get") && args != null && args.length >= 1 && args[0] instanceof Integer col) {
                 Object v = columns.get(col);
