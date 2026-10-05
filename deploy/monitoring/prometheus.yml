@@ -8,7 +8,8 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
 
-  # Control plane: Spring Boot actuator (JVM, HTTP, Hikari of the metadata store, custom dbp_* metrics)
+  # Control plane: Spring Boot actuator (JVM, http_server_requests_*, hikaricp_* of the metadata store).
+  # The POC control plane exports no custom dbp_* meters; platform counts come from its REST API.
   - job_name: control-plane
     metrics_path: /actuator/prometheus
     static_configs:
@@ -16,7 +17,7 @@ scrape_configs:
         labels:
           component: control-plane
 
-  # Gateway admin port: /metrics (Prometheus text format)
+  # Gateway admin port: /metrics (Prometheus text format, dbp_gateway_* + JVM); no authentication
   - job_name: gateway
     metrics_path: /metrics
     static_configs:
@@ -24,7 +25,8 @@ scrape_configs:
         labels:
           component: gateway
 
-  # Proxy admin port: /metrics
+  # Proxy admin port: /metrics (dbp_proxy_*). /metrics and /health are always open; only /connections
+  # and /config require X-DBP-Service-Token, so no bearer configuration is needed here.
   - job_name: proxy
     metrics_path: /metrics
     static_configs:
@@ -32,7 +34,9 @@ scrape_configs:
         labels:
           component: proxy
 
-  # Example applications: HikariCP pool metrics (client-side view of connections)
+  # Example applications: HikariCP pool metrics (client-side view of connections).
+  # Only orders-service bundles micrometer-registry-prometheus; legacy-reporting exposes
+  # /actuator/health and /actuator/metrics but no /actuator/prometheus, so it is not scraped.
   - job_name: examples
     metrics_path: /actuator/prometheus
     static_configs:
@@ -42,5 +46,3 @@ scrape_configs:
         labels: { component: example, app: orders-service, mode: proxy }
       - targets: ["orders-service-gateway:8080"]
         labels: { component: example, app: orders-service, mode: gateway }
-      - targets: ["legacy-reporting:8080"]
-        labels: { component: example, app: legacy-reporting, mode: proxy }

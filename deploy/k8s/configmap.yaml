@@ -8,7 +8,6 @@ data:
   SPRING_PROFILES_ACTIVE: postgres
   DBP_DB_URL: jdbc:postgresql://dbp-metadata-db.dbp.svc.cluster.local:5432/dbp
   DBP_DB_USER: dbp
-  DBP_DB_USERNAME: dbp
   DBP_SECURITY_MODE: none
   DBP_DEMO_SEED_ENABLED: "false"
   DBP_TELEMETRY_RETENTION_HOURS: "72"
@@ -19,3 +18,6 @@ data:
   DBP_GATEWAY_PORT: "7420"
   DBP_GATEWAY_ADMIN_PORT: "7421"
   DBP_PROXY_ADMIN_PORT: "7431"
+  # proxy hardening (see dbp-proxy/README.md): refuse undeclared aliases, cap unidentified callers
+  DBP_PROXY_STRICT_ALIASES: "false"
+  DBP_PROXY_UNKNOWN_APP_MAX_CONNECTIONS: "0"

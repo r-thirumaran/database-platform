@@ -71,6 +71,18 @@ spec:
                 configMapKeyRef:
                   name: dbp-config
                   key: DBP_TELEMETRY_FLUSH_MS
+            - name: DBP_PROXY_STRICT_ALIASES
+              valueFrom:
+                configMapKeyRef:
+                  name: dbp-config
+                  key: DBP_PROXY_STRICT_ALIASES
+            - name: DBP_PROXY_UNKNOWN_APP_MAX_CONNECTIONS
+              valueFrom:
+                configMapKeyRef:
+                  name: dbp-config
+                  key: DBP_PROXY_UNKNOWN_APP_MAX_CONNECTIONS
+            # with DBP_SERVICE_TOKEN set, GET /connections and GET /config on the admin port require
+            # X-DBP-Service-Token; /health (probes) and /metrics (Prometheus) stay open
             - name: DBP_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:

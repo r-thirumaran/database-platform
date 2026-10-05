@@ -97,7 +97,6 @@ services:
       SPRING_PROFILES_ACTIVE: postgres
       DBP_DB_URL: jdbc:postgresql://postgres:5432/dbp
       DBP_DB_USER: dbp
-      DBP_DB_USERNAME: dbp          # same value under both spellings used by the docs
       DBP_DB_PASSWORD: ${DBP_DB_PASSWORD:-dbp}
       DBP_SERVICE_TOKEN: ${DBP_SERVICE_TOKEN:-dev-service-token}
       DBP_MASTER_KEY: ${DBP_MASTER_KEY:?Set DBP_MASTER_KEY in deploy/.env}
@@ -157,6 +156,12 @@ services:
       <<: *platform-env
       DBP_PROXY_ID: proxy-1
       DBP_PROXY_ADMIN_PORT: "7431"
+      # DBP_SERVICE_TOKEN (from platform-env) is set, so GET /connections and GET /config on the admin
+      # port require the header X-DBP-Service-Token; /health and /metrics stay open for Prometheus.
+      # true = refuse sales.<alias> when no application declares <alias> (ORA-12514 / 3D000)
+      DBP_PROXY_STRICT_ALIASES: ${DBP_PROXY_STRICT_ALIASES:-false}
+      # per-datasource cap on connections without a resolved application (0 = unlimited)
+      DBP_PROXY_UNKNOWN_APP_MAX_CONNECTIONS: ${DBP_PROXY_UNKNOWN_APP_MAX_CONNECTIONS:-0}
     ports:
       # the proxy owns the "real" database ports on the host; applications on the host use
       # jdbc:oracle:thin:@//localhost:1521/sales.<app> and jdbc:postgresql://localhost:5432/sales.<app>

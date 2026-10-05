@@ -44,7 +44,7 @@ confused (relationship/dependency, logical/physical, owner/producer) the contras
 | **Service alias** | Logical service name an application asks the proxy for: `<datasource>` or `<datasource>.<application>` (Oracle `SERVICE_NAME`, PostgreSQL database name). The proxy rewrites it to the backend's real service. |
 | **Service token** | Shared secret (`DBP_SERVICE_TOKEN`, header `X-DBP-Service-Token`) protecting `/api/v1/internal/**` used by gateways and proxies. |
 | **Session (database session)** | An engine-side session/process (Oracle `V$SESSION` row, PostgreSQL backend). Equals one physical connection from the gateway or one proxied client connection. |
-| **Static mode** | Gateway or proxy running without a control plane from a YAML file (`DBP_GATEWAY_CONFIG`, `DBP_PROXY_CONFIG`); no authentication, telemetry without ids. Test environments only. |
+| **Static mode** | Gateway or proxy running without a control plane from a YAML file (`DBP_GATEWAY_CONFIG`, `DBP_PROXY_CONFIG`); api keys only if the gateway file declares `applications`, telemetry without ids. Test environments only. |
 | **Switch** | `POST /datasources/{id}/switch`: changes the datasource's `currentDatabaseId`; the default route for all applications without a rule. |
 | **Team** | Organisational owner of applications, datasources, tables and routines; has contacts and tags. |
 | **Telemetry** | Asynchronous events from components to the control plane: `QueryEvent` (gateway, per statement), `ConnectionEvent` (proxy, per connection), `PoolStats`, heartbeats. Buffered, never blocking the data path, dropped under back-pressure. |

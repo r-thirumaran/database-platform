@@ -9,7 +9,7 @@
   "editable": true,
   "graphTooltip": 1,
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "15s",
   "time": {
     "from": "now-30m",
@@ -19,7 +19,7 @@
     "list": [
       {
         "name": "datasource",
-        "label": "DBP datasource",
+        "label": "Datasource (gateway)",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -41,14 +41,14 @@
       },
       {
         "name": "application",
-        "label": "Application",
+        "label": "Application (proxy)",
         "type": "query",
         "datasource": {
           "type": "prometheus",
           "uid": "dbp-prometheus"
         },
         "query": {
-          "query": "label_values(dbp_gateway_statements_total, application)",
+          "query": "label_values(dbp_proxy_connections_active, application)",
           "refId": "app"
         },
         "refresh": 2,
@@ -93,7 +93,7 @@
       "targetBlank": true
     },
     {
-      "title": "Proxy admin",
+      "title": "Live connections (portal)",
       "type": "link",
       "url": "http://localhost:8080/connections",
       "targetBlank": true
@@ -112,7 +112,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Database Access Platform \u2013 overview.** Scraped by `deploy/monitoring/prometheus.yml`. Metric families from `docs/operations.md` (Metrics catalogue):\ngateway `dbp_gateway_logical_sessions{datasource,application}`, `dbp_gateway_pinned_sessions`, `dbp_gateway_pool_{active,idle,waiting,total,max}{datasource,database}`, `dbp_gateway_statements_total{datasource,application,operation,success}`, `dbp_gateway_statement_duration_seconds`, `dbp_gateway_pool_acquire_seconds`, `dbp_gateway_errors_total{sqlState}`, `dbp_gateway_telemetry_dropped_total` \u00b7\nproxy `dbp_proxy_connections_active{listener,application,datasource,backend}`, `dbp_proxy_connections_opened_total`, `dbp_proxy_connections_refused_total{listener,reason}`, `dbp_proxy_telemetry_dropped_total` \u00b7\ncontrol plane `dbp_controlplane_telemetry_events_total{type}`, `dbp_controlplane_components_online`, `dbp_controlplane_violations_open{policyKind}`, `dbp_controlplane_collector_runs_total{database,what,outcome}` \u00b7 examples `hikaricp_connections_active{pool}`.\n\nExact names/labels are fixed by each module README and visible on `/metrics`; adjust a query here if a component differs. The gateway story is **logical vs physical**; the proxy story is **connections by application**."
+        "content": "**Database Access Platform – overview.** Scraped by `deploy/monitoring/prometheus.yml`. Exact metric names and labels (see `docs/operations.md`, Metrics catalogue):\ngateway `dbp_gateway_logical_sessions{datasource}`, `dbp_gateway_pinned_sessions{datasource}`, `dbp_gateway_pool_{active,idle,waiting,total,max}{datasource}`, `dbp_gateway_statements_total{datasource,operation,success}`, `dbp_gateway_statement_duration_seconds_bucket{datasource}`, `dbp_gateway_errors_total{sqlstate}`, `dbp_gateway_telemetry_dropped_total` · proxy `dbp_proxy_connections_active{listener,application,datasource,backend}`, `dbp_proxy_connections_live`, `dbp_proxy_connections_{accepted,refused,failed}_total{listener[,reason]}`, `dbp_proxy_bytes_{in,out}_bytes_total{listener}`, `dbp_proxy_backend_connect_seconds{listener,backend,quantile}`, `dbp_proxy_telemetry_events_dropped` · control plane: Spring Boot defaults only (`http_server_requests_seconds_*{uri,status}`, `hikaricp_*`, `jvm_*`; no custom `dbp_*` meters — platform counts live in the REST API) · examples `hikaricp_connections_active{pool}` (orders-service only).\n\nGateway meters carry no `application` label (per-application numbers come from `GET /stats/queries/top`), so the *Application* variable filters proxy panels only. The gateway story is **logical vs physical**; the proxy story is **connections by application**."
       }
     },
     {
@@ -173,7 +173,7 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum(dbp_gateway_logical_sessions{datasource=~\"$datasource\",application=~\"$application\"})",
+          "expr": "sum(dbp_gateway_logical_sessions{datasource=~\"$datasource\"})",
           "legendFormat": "logical",
           "refId": "A",
           "range": true,
@@ -333,7 +333,7 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum(rate(dbp_gateway_statements_total{datasource=~\"$datasource\",application=~\"$application\"}[1m]))",
+          "expr": "sum(rate(dbp_gateway_statements_total{datasource=~\"$datasource\"}[1m]))",
           "legendFormat": "stmt/s",
           "refId": "A",
           "range": true,
@@ -403,7 +403,7 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum(rate(dbp_gateway_statements_total{success=\"false\",datasource=~\"$datasource\",application=~\"$application\"}[5m])) / clamp_min(sum(rate(dbp_gateway_statements_total{datasource=~\"$datasource\",application=~\"$application\"}[5m])), 1e-9)",
+          "expr": "sum(rate(dbp_gateway_statements_total{success=\"false\",datasource=~\"$datasource\"}[5m])) / clamp_min(sum(rate(dbp_gateway_statements_total{datasource=~\"$datasource\"}[5m])), 1e-9)",
           "legendFormat": "errors",
           "refId": "A",
           "range": true,
@@ -415,7 +415,7 @@
       "id": 8,
       "type": "stat",
       "title": "Telemetry events dropped (1h)",
-      "description": "Gateway + proxy buffer drops in the last hour. Above 0 = the control plane is not keeping up or unreachable.",
+      "description": "Events lost by gateway (dbp_gateway_telemetry_dropped_total) and proxy (dbp_proxy_telemetry_events_dropped, a monotonic gauge) over the last hour.",
       "datasource": {
         "type": "prometheus",
         "uid": "dbp-prometheus"
@@ -468,7 +468,7 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum(increase(dbp_gateway_telemetry_dropped_total[1h])) + sum(increase(dbp_proxy_telemetry_dropped_total[1h]))",
+          "expr": "sum(increase(dbp_gateway_telemetry_dropped_total[1h])) + sum(increase(dbp_proxy_telemetry_events_dropped[1h]))",
           "legendFormat": "dropped",
           "refId": "A",
           "range": true,
@@ -744,7 +744,7 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "Proxy: opened and refused / min",
+      "title": "Proxy: accepted, refused and failed / min",
       "description": "Refusals: quota (maxProxyConnections), unknown_service (no datasource/alias), backend_failed.",
       "datasource": {
         "type": "prometheus",
@@ -781,7 +781,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "opened"
+              "options": "accepted"
             },
             "properties": [
               {
@@ -830,8 +830,8 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum(increase(dbp_proxy_connections_opened_total[1m]))",
-          "legendFormat": "opened",
+          "expr": "sum(increase(dbp_proxy_connections_accepted_total[1m]))",
+          "legendFormat": "accepted",
           "refId": "A",
           "range": true,
           "instant": false
@@ -844,6 +844,17 @@
           "expr": "sum by (reason) (increase(dbp_proxy_connections_refused_total[1m]))",
           "legendFormat": "refused: {{reason}}",
           "refId": "B",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "dbp-prometheus"
+          },
+          "expr": "sum(increase(dbp_proxy_connections_failed_total[1m]))",
+          "legendFormat": "backend failed",
+          "refId": "C",
           "range": true,
           "instant": false
         }
@@ -930,7 +941,7 @@
       "id": 14,
       "type": "timeseries",
       "title": "Client side: HikariCP pools of the examples",
-      "description": "What the applications see. In gateway mode these are logical connections; compare with the gateway's physical count.",
+      "description": "HikariCP meters of the three orders-service variants (legacy-reporting bundles no Prometheus registry).",
       "datasource": {
         "type": "prometheus",
         "uid": "dbp-prometheus"
@@ -1019,8 +1030,8 @@
     {
       "id": 16,
       "type": "timeseries",
-      "title": "Statements / s by application",
-      "description": "",
+      "title": "Statements / s by datasource",
+      "description": "Gateway meters have no application label; per-application statement counts are in the portal (Queries page, GET /stats/queries/top?applicationId=).",
       "datasource": {
         "type": "prometheus",
         "uid": "dbp-prometheus"
@@ -1074,8 +1085,8 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum by (application) (rate(dbp_gateway_statements_total{datasource=~\"$datasource\",application=~\"$application\"}[1m]))",
-          "legendFormat": "{{application}}",
+          "expr": "sum by (datasource) (rate(dbp_gateway_statements_total{datasource=~\"$datasource\"}[1m]))",
+          "legendFormat": "{{datasource}}",
           "refId": "A",
           "range": true,
           "instant": false
@@ -1261,7 +1272,7 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum by (operation) (rate(dbp_gateway_statements_total{datasource=~\"$datasource\",application=~\"$application\"}[1m]))",
+          "expr": "sum by (operation) (rate(dbp_gateway_statements_total{datasource=~\"$datasource\"}[1m]))",
           "legendFormat": "{{operation}}",
           "refId": "A",
           "range": true,
@@ -1273,7 +1284,7 @@
       "id": 18,
       "type": "timeseries",
       "title": "Statement latency p50 / p95 / p99",
-      "description": "End-to-end statement latency measured at the gateway.",
+      "description": "End-to-end statement latency at the gateway, including the wait for a physical connection (SLO buckets 1 ms … 30 s).",
       "datasource": {
         "type": "prometheus",
         "uid": "dbp-prometheus"
@@ -1373,7 +1384,7 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(dbp_gateway_statement_duration_seconds_bucket{datasource=~\"$datasource\",application=~\"$application\"}[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(dbp_gateway_statement_duration_seconds_bucket{datasource=~\"$datasource\"}[5m])))",
           "legendFormat": "p50",
           "refId": "A",
           "range": true,
@@ -1384,7 +1395,7 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(dbp_gateway_statement_duration_seconds_bucket{datasource=~\"$datasource\",application=~\"$application\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(dbp_gateway_statement_duration_seconds_bucket{datasource=~\"$datasource\"}[5m])))",
           "legendFormat": "p95",
           "refId": "B",
           "range": true,
@@ -1395,7 +1406,7 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(dbp_gateway_statement_duration_seconds_bucket{datasource=~\"$datasource\",application=~\"$application\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(dbp_gateway_statement_duration_seconds_bucket{datasource=~\"$datasource\"}[5m])))",
           "legendFormat": "p99",
           "refId": "C",
           "range": true,
@@ -1406,8 +1417,8 @@
     {
       "id": 19,
       "type": "timeseries",
-      "title": "Pool acquire wait p95 by datasource",
-      "description": "Time a logical session waits to pin a physical connection.",
+      "title": "Proxy: backend connect latency p95 by listener",
+      "description": "dbp_proxy_backend_connect_seconds publishes p50/p95/p99 as quantile series.",
       "datasource": {
         "type": "prometheus",
         "uid": "dbp-prometheus"
@@ -1461,8 +1472,8 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, datasource) (rate(dbp_gateway_pool_acquire_seconds_bucket{datasource=~\"$datasource\"}[5m])))",
-          "legendFormat": "{{datasource}}",
+          "expr": "max by (listener) (dbp_proxy_backend_connect_seconds{quantile=\"0.95\"})",
+          "legendFormat": "{{listener}}",
           "refId": "A",
           "range": true,
           "instant": false
@@ -1473,7 +1484,7 @@
       "id": 20,
       "type": "timeseries",
       "title": "Errors / s by SQLState",
-      "description": "Gateway-originated (28000 auth, 08004 no grant, HY000) and physical errors returned to clients.",
+      "description": "Every ERROR frame the gateway sent, including rejected HELLOs (label sqlstate, lower-case).",
       "datasource": {
         "type": "prometheus",
         "uid": "dbp-prometheus"
@@ -1527,8 +1538,8 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum by (sqlState) (rate(dbp_gateway_errors_total[1m]))",
-          "legendFormat": "{{sqlState}}",
+          "expr": "sum by (sqlstate) (rate(dbp_gateway_errors_total[1m]))",
+          "legendFormat": "{{sqlstate}}",
           "refId": "A",
           "range": true,
           "instant": false
@@ -1538,7 +1549,7 @@
     {
       "id": 21,
       "type": "row",
-      "title": "Control plane",
+      "title": "Control plane (Spring Boot actuator)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -1551,8 +1562,8 @@
     {
       "id": 22,
       "type": "stat",
-      "title": "Components online",
-      "description": "Gateways + proxies with a recent heartbeat.",
+      "title": "Telemetry ingest req/s",
+      "description": "POSTs to /api/v1/internal/telemetry/* (queries, connections, pools). The POC control plane has no custom dbp_* meters; components online and violations are on the portal.",
       "datasource": {
         "type": "prometheus",
         "uid": "dbp-prometheus"
@@ -1565,7 +1576,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "reqps",
           "color": {
             "mode": "fixed",
             "fixedColor": "#199e70"
@@ -1593,8 +1604,8 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum(dbp_controlplane_components_online)",
-          "legendFormat": "online",
+          "expr": "sum(rate(http_server_requests_seconds_count{job=\"control-plane\",uri=~\"/api/v1/internal/telemetry/.*\"}[1m]))",
+          "legendFormat": "ingest",
           "refId": "A",
           "range": true,
           "instant": false
@@ -1604,8 +1615,8 @@
     {
       "id": 23,
       "type": "stat",
-      "title": "Open violations",
-      "description": "Governance violations with status OPEN.",
+      "title": "Control plane 5xx (5m)",
+      "description": "Server errors of the control plane API over the last 5 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "dbp-prometheus"
@@ -1662,8 +1673,8 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum(dbp_controlplane_violations_open)",
-          "legendFormat": "violations",
+          "expr": "sum(increase(http_server_requests_seconds_count{job=\"control-plane\",status=~\"5..\"}[5m]))",
+          "legendFormat": "5xx",
           "refId": "A",
           "range": true,
           "instant": false
@@ -1673,8 +1684,8 @@
     {
       "id": 24,
       "type": "timeseries",
-      "title": "Telemetry events accepted / s by type",
-      "description": "",
+      "title": "Internal API requests / s by endpoint",
+      "description": "Telemetry ingestion and heartbeats from gateways and proxies.",
       "datasource": {
         "type": "prometheus",
         "uid": "dbp-prometheus"
@@ -1706,53 +1717,7 @@
           "unit": "reqps",
           "min": 0
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "query"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#3987e5"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "connection"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#199e70"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "pool"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#9085e9"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "legend": {
@@ -1774,8 +1739,8 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum by (type) (rate(dbp_controlplane_telemetry_events_total[1m]))",
-          "legendFormat": "{{type}}",
+          "expr": "sum by (uri) (rate(http_server_requests_seconds_count{job=\"control-plane\",uri=~\"/api/v1/internal/.*\"}[1m]))",
+          "legendFormat": "{{uri}}",
           "refId": "A",
           "range": true,
           "instant": false
@@ -1785,8 +1750,8 @@
     {
       "id": 25,
       "type": "timeseries",
-      "title": "Collector runs / 5m by outcome",
-      "description": "DICTIONARY / RUNTIME / AUDIT runs per database.",
+      "title": "Control plane API mean latency by endpoint",
+      "description": "rate(sum)/rate(count) of http_server_requests_seconds; Spring Boot exports no histogram buckets by default.",
       "datasource": {
         "type": "prometheus",
         "uid": "dbp-prometheus"
@@ -1815,7 +1780,7 @@
               "group": "A"
             }
           },
-          "unit": "short",
+          "unit": "s",
           "min": 0
         },
         "overrides": []
@@ -1840,8 +1805,8 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum by (what, outcome) (increase(dbp_controlplane_collector_runs_total[5m]))",
-          "legendFormat": "{{what}} {{outcome}}",
+          "expr": "sum by (uri) (rate(http_server_requests_seconds_sum{job=\"control-plane\",uri=~\"/api/v1/.*\"}[5m])) / clamp_min(sum by (uri) (rate(http_server_requests_seconds_count{job=\"control-plane\",uri=~\"/api/v1/.*\"}[5m])), 1e-9)",
+          "legendFormat": "{{uri}}",
           "refId": "A",
           "range": true,
           "instant": false
@@ -1851,8 +1816,8 @@
     {
       "id": 26,
       "type": "timeseries",
-      "title": "Open violations by policy",
-      "description": "",
+      "title": "Metadata store pool (HikariCP)",
+      "description": "Connections of the control plane to its PostgreSQL metadata store.",
       "datasource": {
         "type": "prometheus",
         "uid": "dbp-prometheus"
@@ -1906,9 +1871,31 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum by (policyKind) (dbp_controlplane_violations_open)",
-          "legendFormat": "{{policyKind}}",
+          "expr": "sum(hikaricp_connections_active{job=\"control-plane\"})",
+          "legendFormat": "active",
           "refId": "A",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "dbp-prometheus"
+          },
+          "expr": "sum(hikaricp_connections_idle{job=\"control-plane\"})",
+          "legendFormat": "idle",
+          "refId": "B",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "dbp-prometheus"
+          },
+          "expr": "sum(hikaricp_connections_pending{job=\"control-plane\"})",
+          "legendFormat": "pending",
+          "refId": "C",
           "range": true,
           "instant": false
         }
@@ -1917,8 +1904,8 @@
     {
       "id": 27,
       "type": "timeseries",
-      "title": "JVM heap used by component",
-      "description": "Micrometer JVM gauges of control plane, gateway, proxy and the examples (job label from prometheus.yml).",
+      "title": "Control plane JVM heap",
+      "description": "Gateway and proxy register no JVM meters in the POC; only the control plane exposes jvm_*.",
       "datasource": {
         "type": "prometheus",
         "uid": "dbp-prometheus"
@@ -1972,9 +1959,20 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum by (job) (jvm_memory_used_bytes{area=\"heap\"})",
-          "legendFormat": "{{job}}",
+          "expr": "sum(jvm_memory_used_bytes{job=\"control-plane\",area=\"heap\"})",
+          "legendFormat": "heap used",
           "refId": "A",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "dbp-prometheus"
+          },
+          "expr": "sum(jvm_memory_max_bytes{job=\"control-plane\",area=\"heap\"})",
+          "legendFormat": "heap max",
+          "refId": "B",
           "range": true,
           "instant": false
         }

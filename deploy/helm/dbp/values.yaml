@@ -81,7 +81,9 @@ proxy:
     oracle: 1521
     postgres: 5432
     mssql: 1433
-    admin: 7431
+    admin: 7431            # /health and /metrics open; /connections and /config need X-DBP-Service-Token
+  strictAliases: false     # DBP_PROXY_STRICT_ALIASES: refuse <datasource>.<alias> when no application declares <alias>
+  unknownAppMaxConnections: 0   # DBP_PROXY_UNKNOWN_APP_MAX_CONNECTIONS: per-datasource cap for unidentified callers (0 = unlimited)
   resources:
     requests: { cpu: 250m, memory: 384Mi }
     limits: { memory: 768Mi }
@@ -99,6 +101,7 @@ networkPolicy:
     - 10.100.0.0/16
   databasePorts: [1521, 5432, 1433]
   consumerNamespaceLabel: "dbp.io/consumer"
+  monitoringNamespaceLabel: "dbp.io/monitoring"
 
 podSecurityContext:
   runAsNonRoot: true

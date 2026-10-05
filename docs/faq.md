@@ -63,13 +63,14 @@ both. See [metadata-model.md](metadata-model.md).
 ### What happens when the control plane is down?
 
 Gateways and proxies keep serving on their cached configuration (resolution results, credentials in
-memory, proxy routes and quotas). New sessions for already-resolved (application, datasource) pairs
-work; a never-seen api key cannot be authenticated and gets `08004` until the control plane is back
-(implementation detail: verify the cache policy in the gateway README). Telemetry is buffered in a
-bounded queue (50 000 events by default) and the oldest events are dropped once it fills; drops are
-counted in `*_telemetry_dropped_total`. Credential rotations and routing changes wait until the control
-plane returns. The UI is unavailable because it only talks to the control plane. See
-[operations.md](operations.md#upgrade-and-zero-downtime-notes).
+memory, proxy routes and quotas). New sessions for an api key the gateway has seen within
+`DBP_AUTH_CACHE_SECONDS` (60 s) and an already-resolved (datasource, application) pair work — stale
+cache entries keep serving during the outage; a never-seen api key cannot be authenticated and gets
+`08004` until the control plane is back. Telemetry is buffered in a bounded queue (50 000 events by
+default) and the oldest events are dropped once it fills; drops are counted in
+`dbp_gateway_telemetry_dropped_total` / `dbp_proxy_telemetry_events_dropped`. Credential rotations and
+routing changes wait until the control plane returns. The UI is unavailable because it only talks to the
+control plane. See [operations.md](operations.md#upgrade-and-zero-downtime-notes).
 
 ### What happens when a credential is rotated?
 
@@ -80,9 +81,11 @@ Runbook in [operations.md](operations.md#credential-rotation-runbook).
 
 ### What happens when an api key is revoked?
 
-New sessions with that key fail with SQLState `08004`. Existing sessions are terminated on the next
-config refresh (verify in the gateway README) or live until the application closes them. Rotate by
-issuing a second key first, then revoking the old one. See [security.md](security.md#application-identity-api-keys).
+New sessions with that key fail with SQLState `08004` as soon as the gateway's positive cache entry
+expires (at most `DBP_AUTH_CACHE_SECONDS`, 60 s). Existing sessions are **not** terminated — the gateway
+authenticates at HELLO only — so they live until the application closes them; restart the workload if
+the key was compromised. Rotate by issuing a second key first, then revoking the old one. See
+[security.md](security.md#application-identity-api-keys).
 
 ### Is SQL translated?
 
@@ -114,9 +117,10 @@ One extra network hop and one encode/decode of each request and result batch in 
 extra hop and a byte relay in the proxy. Numbers are **to be measured** in your environment with the
 load generator in `dbp-examples` (compare direct, proxy and gateway modes of `orders-service`). Factors:
 network latency between application, gateway and database (keep them in the same zone), `fetchSize`,
-row width, and whether a statement had to acquire a physical connection (pinning latency, visible in
-`dbp_gateway_pool_acquire_seconds`). The gateway uses virtual threads, so concurrency is bounded by
-pool size and memory rather than by threads ([ADR 0004](adr/0004-java21-virtual-threads-for-gateway-and-proxy.md)).
+row width, and whether a statement had to acquire a physical connection (the wait is part of
+`dbp_gateway_statement_duration_seconds`; `dbp_gateway_pool_waiting > 0` shows sessions queueing for
+one). The gateway uses virtual threads, so concurrency is bounded by pool size and memory rather than
+by threads ([ADR 0004](adr/0004-java21-virtual-threads-for-gateway-and-proxy.md)).
 
 ### Does the gateway reduce Oracle sessions for every application?
 
@@ -132,22 +136,34 @@ happens over time, not concurrently.
 
 ### What does the database see as the connecting user?
 
-For the gateway: the datasource's pool account (one per datasource), with `V$SESSION.MODULE/ACTION/
-CLIENT_IDENTIFIER` (Oracle) set from the application's client info so DBAs still see the logical
-application. For the proxy: whatever the application authenticates as (unchanged). Prefer one database
-account per datasource rather than per application.
+For the gateway: the datasource's pool account (one per datasource) with `V$SESSION.PROGRAM =
+dbp-gateway/<gatewayId>`, and `MODULE / CLIENT_IDENTIFIER / ACTION` (Oracle) set from the application's
+client info (`ApplicationName`, `ClientUser`, `action`) while the session is pinned, so DBAs still see
+the logical application. For the proxy: whatever the application authenticates as (unchanged; the
+proxy's address and port appear as the client). Prefer one database account per datasource rather than
+per application.
 
 ### Can I use the platform with an application I cannot change at all?
 
 Yes, through the proxy, as long as you can change its connection host/port (or DNS). You get identity
 (by service alias, program name, machine or CIDR), quotas, connection telemetry and proxy correlation,
-but no pooling, no central credentials and no routing between engines.
+but no pooling, no central credentials and no routing between engines. Callers you do not control can
+be fenced with `DBP_PROXY_STRICT_ALIASES=true` (undeclared `sales.<alias>` refused) and
+`DBP_PROXY_UNKNOWN_APP_MAX_CONNECTIONS` (cap for unidentified connections).
+
+### Can I correlate a database statement with a request or trace?
+
+Yes, through the gateway: `Connection.setClientInfo("traceparent", …)` (or any name) is sent to the
+gateway at once and included in every `QueryEvent` of that session; `action` and `ApplicationName`
+additionally reach Oracle as `OCSID.ACTION` / `OCSID.MODULE`. A Spring `DataSource` wrapper that stamps
+the current trace on each borrowed connection is in
+[operations.md](operations.md#request-level-tracing). OpenTelemetry export is roadmap.
 
 ### Does the proxy terminate TLS?
 
 Not in the POC. Oracle native network encryption passes through (the connect packet stays readable);
-TCPS, PostgreSQL client SSL and encrypted TDS logins hide what the proxy needs for identity/routing. See
-[security.md](security.md#tls).
+TCPS, PostgreSQL client SSL (the proxy answers `N` to `SSLRequest`, so use `sslmode=disable|prefer`) and
+encrypted TDS logins hide what the proxy needs for identity/routing. See [security.md](security.md#tls).
 
 ### How is identity established for proxied connections?
 
@@ -158,7 +174,7 @@ properties to improve it without code changes. See [collectors.md](collectors.md
 
 ### Which Oracle views does the collector read, and do they need a licence?
 
-`DBA_*` dictionary views, `V$SESSION`, `V$SQL`, `V$SQL_PLAN`, `V$RESOURCE_LIMIT` and, optionally,
+`DBA_*` dictionary views (falling back to `ALL_*`), `V$SESSION`, `V$SQL`, `V$SQL_PLAN` and, optionally,
 `UNIFIED_AUDIT_TRAIL`. None requires an extra option. ASH and AWR (`V$ACTIVE_SESSION_HISTORY`,
 `DBA_HIST_*`) are deliberately **not** used because they require the Diagnostics Pack. Check your own
 licence terms. See [collectors.md](collectors.md#licence-notes).
@@ -204,6 +220,6 @@ service token and master key must be changed from their development defaults. Se
 ### What is not covered by the POC?
 
 Non-Java drivers, TLS termination in the proxy, OIDC for the UI, workload identity (mTLS/SPIFFE),
-external secret managers, row-level policies, XA, scrollable result sets, LOB locators, SQL
-translation. Each is listed with its reason in [compatibility.md](compatibility.md) and
+external secret managers (`VAULT`/`GCP_SECRET_MANAGER`/`AWS_SECRETS_MANAGER` answer `501`), row-level
+policies, XA, scrollable result sets, LOB locators, SQL translation, OpenTelemetry export. Each is listed with its reason in [compatibility.md](compatibility.md) and
 [security.md](security.md#roadmap).

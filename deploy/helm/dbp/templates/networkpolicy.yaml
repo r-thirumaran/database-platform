@@ -82,4 +82,30 @@ spec:
         - { protocol: TCP, port: {{ .Values.proxy.ports.oracle }} }
         - { protocol: TCP, port: {{ .Values.proxy.ports.postgres }} }
         - { protocol: TCP, port: {{ .Values.proxy.ports.mssql }} }
+---
+# Monitoring (namespaces labelled {{ .Values.networkPolicy.monitoringNamespaceLabel }}=true, and pods in this
+# namespace) may scrape the admin/metrics ports of gateway and proxy and the control plane's HTTP port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dbp.fullname" . }}-allow-monitoring
+  labels:
+    {{- include "dbp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: dbp.io/component
+        operator: In
+        values: ["gateway", "proxy", "control-plane"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{ .Values.networkPolicy.monitoringNamespaceLabel }}: "true"
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: {{ .Values.gateway.adminPort | default 7421 }} }
+        - { protocol: TCP, port: {{ .Values.proxy.adminPort | default 7431 }} }
+        - { protocol: TCP, port: {{ .Values.controlPlane.port | default 8080 }} }
 {{- end }}

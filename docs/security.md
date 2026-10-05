@@ -72,11 +72,11 @@ Format: `dbp_<prefix>_<secret>`.
 |--------------|-------------------------------------------------------------------------------------------------------------------------------|
 | Issue        | `POST /applications/{id}/api-keys {"label":"prod"}` → plaintext returned **once**. Store it in the application's secret store.   |
 | Storage      | The control plane stores the `prefix` in clear (lookup) and a salted hash of the secret; `GET …/api-keys` never returns secrets. |
-| Use          | Driver sends it in `HELLO.properties.apiKey` (URL `apiKey=` or the JDBC `password`). The gateway calls `POST /internal/auth/application` and caches the result for the session's lifetime (and for a bounded time for reconnects). |
+| Use          | Driver sends it in `HELLO.properties.apiKey` (URL `apiKey=` or the JDBC `password`). The gateway calls `POST /internal/auth/application` once per HELLO and caches positive results for `DBP_AUTH_CACHE_SECONDS` (60 s), negative ones for 5 s; a stale cache entry keeps serving while the control plane is down. |
 | Scope        | One key ↔ one application. Datasource access is a separate `AccessGrant`; a valid key without a grant gets `08004`.             |
 | Rotation     | Issue a second key (`label: "prod-2026-10"`), deploy it, confirm `lastUsedAt` moves on the new key and stops on the old one, then revoke the old one. Zero-downtime because both are valid during the overlap. |
-| Revocation   | `DELETE /applications/{id}/api-keys/{keyId}` sets `revokedAt`. New sessions fail immediately (`08004`). Existing logical sessions are terminated by the gateway on the next config refresh (implementation-defined; verify in the gateway README) — otherwise they live until the application closes them. |
-| Static mode  | A gateway without a control plane (`DBP_GATEWAY_CONFIG`) does not authenticate; `application` is a hint. Use only in isolated test environments. |
+| Revocation   | `DELETE /applications/{id}/api-keys/{keyId}` sets `revokedAt`. New sessions fail with `08004` once the gateway's positive cache entry expires (≤ `DBP_AUTH_CACHE_SECONDS`, 60 s). **Existing logical sessions are not terminated**: the gateway authenticates at HELLO only and re-resolves the datasource (not the key) at each pin, so they live until the application closes them — restart the workload if a key is compromised. |
+| Static mode  | A gateway without a control plane (`DBP_GATEWAY_CONFIG`) authenticates only against the optional `applications[].apiKey` entries of its YAML; without that section any `application` hint is accepted. Use only in isolated test environments. |
 
 Why api keys first and not workload identity: see ADR 0011. The key is a bearer secret; its blast
 radius is bounded by the grants of the owning application, and it never grants anything on the
@@ -90,10 +90,16 @@ on the control plane, gateways and proxies.
 
 * Change the default before exposing the control plane to anything but localhost.
 * Treat it like a database password: random ≥ 32 bytes, stored in your secret manager, rotated by
-  updating the control plane and the components (rolling restart; components fail closed with `401`
-  until they have the new token — plan the order: control plane accepts old+new during the rollover if
-  your version supports two tokens, otherwise restart components immediately after).
+  updating the control plane and the components. The control plane accepts exactly one token
+  (`DBP_SERVICE_TOKEN`), so a rotation is: restart the control plane with the new value, then restart
+  gateways and proxies immediately — in between they get `401`, keep serving from cache and buffer
+  telemetry (bounded queue, oldest dropped), so keep the window short.
 * Restrict the internal path at the network/ingress layer to the gateway and proxy subnets.
+* The same variable gates the proxy's admin API: with `DBP_SERVICE_TOKEN` set, `GET :7431/connections`
+  and `GET :7431/config` (client addresses, users, program names, route table) require
+  `X-DBP-Service-Token`; `/health` and `/metrics` stay open. The gateway's `/sessions` and `/pools` have
+  no authentication — keep both admin ports off application networks (see
+  [Network enforcement](#network-enforcement)) or bind them to localhost (`DBP_PROXY_ADMIN_ADDRESS=127.0.0.1`).
 
 ## Credential providers
 
@@ -102,12 +108,12 @@ never appear on public endpoints.
 
 | Provider                 | `ref`                                  | Where the secret lives                              | Status   |
 |--------------------------|----------------------------------------|-----------------------------------------------------|----------|
-| `INLINE`                 | –                                      | Metadata store, encrypted with `DBP_MASTER_KEY` (symmetric, authenticated encryption; algorithm in the control plane README) | POC |
+| `INLINE`                 | –                                      | Metadata store, encrypted with AES-256-GCM under a key derived as sha-256 of `DBP_MASTER_KEY` (unset → built-in dev key with a `WARN` at startup) | POC |
 | `ENV`                    | environment variable name              | Control plane process environment                   | POC      |
 | `FILE`                   | file path                              | File mounted into the control plane (e.g. Kubernetes Secret volume); re-read on `rotate` | POC |
-| `VAULT`                  | secret path                            | HashiCorp Vault (KV/database engine)                | roadmap  |
-| `GCP_SECRET_MANAGER`     | secret resource name                   | Google Secret Manager                               | roadmap  |
-| `AWS_SECRETS_MANAGER`    | secret ARN/name                        | AWS Secrets Manager                                 | roadmap  |
+| `VAULT`                  | secret path                            | HashiCorp Vault (KV/database engine)                | roadmap: accepted as configuration, `GET /internal/credentials/{id}/material` answers `501` |
+| `GCP_SECRET_MANAGER`     | secret resource name                   | Google Secret Manager                               | roadmap (`501`) |
+| `AWS_SECRETS_MANAGER`    | secret ARN/name                        | AWS Secrets Manager                                 | roadmap (`501`) |
 
 Operational rules:
 
@@ -117,7 +123,8 @@ Operational rules:
 * Prefer `ENV`/`FILE` over `INLINE` in production so the metadata store never contains DB passwords,
   even encrypted.
 * Gateways fetch material on demand (`GET /internal/credentials/{id}/material`) and keep it only in
-  memory; the fetch is audited by the control plane (who, which credential, when).
+  memory; the fetch is audited by the control plane (logger
+  `org.dbplatform.controlplane.audit.credentials`: which credential, when, which component).
 * One DB account per datasource (not per application) is the recommended granularity: it keeps the
   Oracle user count manageable while telemetry provides per-application attribution.
 
@@ -125,12 +132,12 @@ Operational rules:
 
 | Hop                              | Mechanism                                                                                                                         | Notes                                                                                                 |
 |----------------------------------|-----------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------|
-| Driver → gateway                 | TLS on 7420; driver `ssl=true`, gateway `DBP_GATEWAY_TLS_KEYSTORE` (+ password variable). Protocol unchanged under TLS.             | Truststore: the JVM default or the driver property documented in the driver README. Hostname verification follows the JVM default. |
+| Driver → gateway                 | TLS on 7420; driver `ssl=true`, gateway `DBP_GATEWAY_TLS_KEYSTORE` + `DBP_GATEWAY_TLS_KEYSTORE_PASSWORD` (PKCS12/JKS). Protocol unchanged under TLS. | The driver uses `SSLSocketFactory.getDefault()`: trust comes from the JVM trust store (`javax.net.ssl.trustStore` system properties); there is no driver-level truststore property. Hostname verification follows the JVM default. |
 | Gateway → database               | Vendor driver settings via `Database.jdbcProperties` (Oracle: `oracle.net.encryption_client=REQUIRED` for native network encryption, or a TCPS URL with wallet/truststore; PostgreSQL: `ssl=true&sslmode=verify-full`; SQL Server: `encrypt=true;trustServerCertificate=false`). | Standard vendor configuration; the gateway does nothing special.                                     |
 | Proxy ↔ Oracle                   | **Native network encryption (ANO) passes through**: the TNS connect packet (service name, program, host, user) is in clear, the encryption is negotiated afterwards end-to-end between client and server. | TCPS (TLS from the client) would hide the connect packet, so the proxy could neither identify nor route; not supported in the POC. |
 | Proxy ↔ PostgreSQL               | Limitation: the client sends `SSLRequest` before the startup message. The POC proxy answers `N` (no SSL) and reads the startup message in clear; clients must allow it (`sslmode=prefer` falls back, `sslmode=require` fails). The proxy → server leg may still use SSL. | Roadmap: TLS termination in the proxy with its own certificate.                                      |
 | Proxy ↔ SQL Server               | TDS negotiates encryption in pre-login; with `encrypt=true` (default in recent drivers) the LOGIN7 packet (application name, host, database) is encrypted and invisible to the proxy. | Identity via CIDR only, or `encrypt=false` inside a trusted network, or TLS termination (roadmap). |
-| Components → control plane       | Plain HTTP inside the platform network in the POC                                                                                 | Terminate TLS at an ingress/sidecar; the clients honour `https://` URLs.                               |
+| Components → control plane       | Plain HTTP inside the platform network in the POC                                                                                 | Terminate TLS at an ingress/sidecar; `DBP_CONTROL_PLANE_URL` may be `https://` (JVM trust store; the telemetry client accepts a custom `HttpClient` for other trust settings). |
 
 ## Network enforcement
 
@@ -141,7 +148,8 @@ The platform's value depends on applications not being able to go around it.
   ingress to 1521/5432/1433 from the `dbp-gateway`, `dbp-proxy` and `dbp-control-plane` labels only.
 * Applications reach the gateway (7420) and the proxy (1521/5432/1433 on the proxy service) only.
 * Admin ports (7421, 7431) and the control plane's `/api/v1/internal/**` are reachable from the platform
-  namespace and monitoring only.
+  namespace and monitoring only (`deploy/k8s/networkpolicy.yaml` admits 7421/7431 from namespaces
+  labelled `dbp.io/monitoring=true`). Prometheus needs only `/metrics`, which never requires the token.
 * The `DIRECT_DB_ACCESS_BYPASSING_PLATFORM` governance policy uses collector session samples to flag
   database sessions whose client address is neither a gateway nor a proxy; it is detection, not prevention.
 
@@ -174,10 +182,12 @@ spec:
 Gateway telemetry is attribution-grade (application identity is authenticated), but it is not a tamper-
 evident audit log and it does not contain parameter values. Where regulation requires a database-side
 record, enable the vendor audit on the schemas concerned and let the collector import it
-(`collector.auditTrail: true`, Oracle `AUDIT_VIEWER`). The gateway forwards `ApplicationName`,
-`ClientUser` and `ClientHostname` client info to the physical connection (`V$SESSION.MODULE/ACTION/
-CLIENT_IDENTIFIER` on Oracle), so even the database audit shows the logical application rather than
-only the shared pool user.
+(`collector.auditTrail: true`, Oracle `AUDIT_VIEWER`). The gateway forwards every client info entry the
+application sets to the physical connection while the session is pinned and, for Oracle, maps
+`ApplicationName` → `OCSID.MODULE`, `ClientUser` → `OCSID.CLIENTID` and `action` → `OCSID.ACTION`
+(`V$SESSION.MODULE / CLIENT_IDENTIFIER / ACTION`, `UNIFIED_AUDIT_TRAIL.CLIENT_IDENTIFIER`), so even the
+database audit shows the logical application rather than only the shared pool user
+`dbp-gateway/<gatewayId>`. See [Request-level tracing](operations.md#request-level-tracing).
 
 The control plane itself records: credential material reads, `MigrationEvent`s (`by`), api-key issue/
 revoke timestamps. Operator identity is only meaningful with `DBP_SECURITY_MODE` ≠ `none`.
@@ -224,11 +234,14 @@ consuming applications need (typically `SELECT/INSERT/UPDATE/DELETE` on the doma
 | SQL text                           | Telemetry carries `sqlNormalized` with literals replaced by `?` (max 4000 chars). Raw SQL with literals is not sent. |
 | Bind parameters / result rows      | Never leave the gateway as telemetry.                                                                       |
 | Error messages                     | Truncated to 500 chars. **Residual risk**: vendor messages may quote values (e.g. a unique-constraint violation naming a key). Consider a redaction filter on `errorMessage` where this matters. |
-| Client info                        | `ApplicationName`, `ClientUser`, `ClientHostname` are intentionally attribution data; do not put secrets there. |
+| Client info                        | Every `setClientInfo` entry (`ApplicationName`, `ClientUser`, `action`, trace ids, …) is attribution data: it is stored in `QueryEvent.clientInfo`, shown on `GET :7421/sessions` and forwarded to the database session; do not put secrets there. |
 | Dumps                              | `GET /export` excludes secrets by contract.                                                                  |
 
-Logging configuration: gateway and proxy ship Logback; keep `org.dbplatform` at `INFO` in production
-(`DEBUG` on the gateway can log full SQL).
+Logging configuration: gateway and proxy ship Logback (`DBP_LOG_LEVEL`, gateway also
+`DBP_LOG_LEVEL_HIKARI`); keep them at `INFO` in production (`DEBUG` on the gateway can log full SQL;
+`DEBUG` on the proxy logs every handshake with service names, programs and users). The driver logs
+through `java.util.logging` (`org.dbplatform.jdbc`) and never logs SQL text, parameters or rows, even at
+`FINE`.
 
 ## Roadmap
 

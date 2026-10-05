@@ -324,7 +324,7 @@ Ingestion is idempotent on `eventId`. The control plane:
 
 ## 12. Components
 
-* `GET /components` → online gateways / proxies from heartbeats: `[{ "componentType", "componentId", "version", "host", "startedAt", "lastHeartbeat", "healthy", "stats": {…} }]`
+* `GET /components` → online gateways / proxies from heartbeats: `[{ "componentType", "componentId", "version", "host", "startedAt", "lastHeartbeat", "healthy", "configVersion", "stats": {…} }]`
 
 ## 13. Import / export / seed
 

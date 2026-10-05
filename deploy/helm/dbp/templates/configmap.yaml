@@ -8,7 +8,6 @@ data:
   SPRING_PROFILES_ACTIVE: {{ .Values.controlPlane.springProfile | quote }}
   DBP_DB_URL: {{ .Values.config.metadataDb.url | quote }}
   DBP_DB_USER: {{ .Values.config.metadataDb.user | quote }}
-  DBP_DB_USERNAME: {{ .Values.config.metadataDb.user | quote }}
   DBP_SECURITY_MODE: {{ .Values.config.securityMode | quote }}
   DBP_DEMO_SEED_ENABLED: {{ .Values.config.demoSeedEnabled | quote }}
   DBP_TELEMETRY_RETENTION_HOURS: {{ .Values.config.telemetryRetentionHours | quote }}
@@ -18,3 +17,5 @@ data:
   DBP_GATEWAY_PORT: {{ .Values.gateway.port | quote }}
   DBP_GATEWAY_ADMIN_PORT: {{ .Values.gateway.adminPort | quote }}
   DBP_PROXY_ADMIN_PORT: {{ .Values.proxy.ports.admin | quote }}
+  DBP_PROXY_STRICT_ALIASES: {{ .Values.proxy.strictAliases | quote }}
+  DBP_PROXY_UNKNOWN_APP_MAX_CONNECTIONS: {{ .Values.proxy.unknownAppMaxConnections | quote }}

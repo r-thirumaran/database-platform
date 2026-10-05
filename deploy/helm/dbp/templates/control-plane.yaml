@@ -43,7 +43,7 @@ spec:
             - secretRef:
                 name: {{ include "dbp.secretName" . }}
           env:
-            - name: SERVER_PORT
+            - name: DBP_PORT
               value: {{ .Values.controlPlane.port | quote }}
             - name: JAVA_TOOL_OPTIONS
               value: {{ .Values.javaToolOptions | quote }}

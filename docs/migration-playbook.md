@@ -124,9 +124,11 @@ POST /api/v1/datasources/{id}/routing-rules
 
 * `readOnly: true` makes the gateway open the physical connection read-only; a write from a
   consumer that was believed to be read-only fails fast instead of diverging the two copies.
-* New logical sessions pick up the rule within the gateway's config poll; existing logical sessions keep
-  their current database until they close (SESSION mode) or until the next un-pinned moment
-  (TRANSACTION mode; implementation-defined — verify in the gateway README). A restart of the
+* New logical sessions pick up the rule within the gateway's config poll (`DBP_CONFIG_POLL_SECONDS`, 5 s).
+  Existing logical sessions re-resolve their datasource at every pin (a cache lookup; one
+  `/internal/resolve` call after the config version changed), so in TRANSACTION mode they move to the
+  new database at their next pin — after the current COMMIT/ROLLBACK and once their cursors are closed —
+  while SESSION-mode sessions keep their physical connection until they close. A restart of the
   application is the deterministic way to move all of its sessions.
 * The application must have its dialect/behaviour set for PostgreSQL where needed
   (`hibernate.dialect`); see [compatibility.md](compatibility.md#framework-notes).

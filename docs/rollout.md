@@ -113,8 +113,9 @@ database*, *logical session*, *physical connection*, *pinning*, *pool mode*, *re
 
 ### Metrics
 
-`dbp_proxy_connections_active`, `dbp_proxy_connections_refused_total`, `dbp_controlplane_collector_runs_total`,
-`GET /stats/overview.connections.proxyActive`, share of `identitySource = NONE`.
+`dbp_proxy_connections_active`, `dbp_proxy_connections_refused_total`, `dbp_proxy_connections_failed_total`,
+`GET /databases/{id}/collector-status` (`lastError`), `GET /stats/overview.connections.proxyActive`, share of
+`identitySource = NONE`.
 
 ---
 
@@ -141,8 +142,10 @@ database*, *logical session*, *physical connection*, *pinning*, *pool mode*, *re
    `maxConnections` from the Phase 0 baseline — start at ~25 % of the sessions those services held before).
 2. Create access grants (`POST /access-grants`) per application with `maxLogicalConnections`.
 3. Issue api keys (`POST /applications/{id}/api-keys`) and store them in the application's secret store.
-4. Deploy ≥ 2 gateway instances (`DBP_CONTROL_PLANE_URL`, `DBP_GATEWAY_ID`), verify `/health` on 7421 and
-   that `GET /components` lists them.
+4. Deploy ≥ 2 gateway instances (`DBP_CONTROL_PLANE_URL`, `DBP_SERVICE_TOKEN`, `DBP_GATEWAY_ID`) on a
+   platform that exposes raw TCP 7420 (Kubernetes, VMs, ECS behind an NLB — not Cloud Run; see
+   [operations.md](operations.md#where-each-component-can-run)), verify `/health` on 7421 and that
+   `GET /components` lists them.
 5. Switch the pilot services to the driver (Phase 2 recipe) in a non-production environment first.
 6. Load-test one pilot service through the gateway versus direct; record latency deltas (to be measured;
    see [faq.md](faq.md#what-is-the-overhead)).
@@ -283,8 +286,9 @@ credentials and telemetry but no reduction in physical connections (1 logical = 
 
 ### Metrics
 
-Share of applications by access path (direct / proxy / gateway), `dbp_gateway_statements_total` by application,
-`08004` count (misconfigured keys), `0A000` count (unsupported features).
+Share of applications by access path (direct / proxy / gateway), `dbp_gateway_statements_total` by datasource
+(per application: `GET /stats/queries/top?applicationId=`), `dbp_gateway_errors_total{sqlstate="08004"}`
+(misconfigured keys), `{sqlstate="0A000"}` (unsupported features).
 
 ---
 

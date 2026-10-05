@@ -52,6 +52,10 @@ spec:
               value: {{ include "dbp.controlPlaneUrl" . | quote }}
             - name: DBP_PROXY_ADMIN_PORT
               value: {{ .Values.proxy.ports.admin | quote }}
+            - name: DBP_PROXY_STRICT_ALIASES
+              value: {{ .Values.proxy.strictAliases | quote }}
+            - name: DBP_PROXY_UNKNOWN_APP_MAX_CONNECTIONS
+              value: {{ .Values.proxy.unknownAppMaxConnections | quote }}
             - name: DBP_TELEMETRY_FLUSH_MS
               value: {{ .Values.config.telemetryFlushMs | quote }}
             - name: DBP_SERVICE_TOKEN

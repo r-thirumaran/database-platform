@@ -12,7 +12,7 @@ Design goals:
   the client sends one request frame and reads frames until the *terminal* response frame arrives.
   There are no request ids and no unsolicited server frames.
 * Big-endian, length-prefixed frames. Max frame size is 64 MiB by default (configurable on both
-  sides via `dbp.maxFrameBytes`).
+  sides: driver URL property `maxFrameBytes`, gateway `DBP_GATEWAY_MAX_FRAME_BYTES`).
 * Carry JDBC semantics faithfully (statements, prepared statements, callable statements with OUT
   parameters, result sets with server-side cursors, batches, transactions, savepoints, metadata).
 
@@ -266,7 +266,7 @@ EXECUTE →   ( RESULT_SET_HEADER ROWS | UPDATE_COUNT )*  OUT_PARAMS?  GENERATED
 * Multiple result items implement `Statement.getMoreResults()` / `getUpdateCount()` exactly in
   the order produced by the physical driver.
 * A `cursorId` is unique per session for its lifetime; the gateway may keep at most
-  `dbp.maxOpenCursorsPerSession` (default 256) cursors open and returns ERROR `HY000` beyond that.
+  `DBP_GATEWAY_MAX_OPEN_CURSORS` (default 256) cursors open and returns ERROR `HY000` beyond that.
 * While any cursor is open the session stays pinned to its physical connection.
 
 ### 4.7 Cursor-typed OUT parameters (Oracle `SYS_REFCURSOR`, PostgreSQL `refcursor`)

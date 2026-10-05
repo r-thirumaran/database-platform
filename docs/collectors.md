@@ -10,6 +10,15 @@ and run on the intervals configured per database (`Database.collector`). They co
 replace, gateway telemetry: when an application uses the driver, the gateway already reports every
 statement with confidence 1.0.
 
+Switches: `collector.enabled` per database (**default `false`** — set it when registering the
+database, as `deploy/bootstrap/platform-config.json` does) and the global `DBP_COLLECTOR_ENABLED`
+(`true`). The scheduler ticks every `DBP_COLLECTOR_TICK_SECONDS` (5) and runs each database on its own
+intervals; collector connections use `DBP_COLLECTOR_CONNECT_TIMEOUT_SECONDS` (10) and
+`collector.credential` when set, else the database credential. `DBP_COLLECTOR_MAX_SQL_PER_SAMPLE` (200)
+bounds the new statements fetched from `V$SQL` / `pg_stat_statements` per runtime sample. Trigger a run
+with `POST /databases/{id}/collect {"what":"DICTIONARY|RUNTIME|AUDIT"}`; `GET /databases/{id}/collector-status`
+shows the last runs and `lastError`.
+
 Related: [telemetry-events.md](telemetry-events.md) (derivation rules and confidence),
 [metadata-model.md](metadata-model.md), [security.md](security.md#least-privilege-for-collector-accounts).
 
@@ -32,20 +41,22 @@ account can see except the engine's own schemas.
 |----------------------------------------|------------------------------------------------------------------------------------------------------------------|------------|
 | Tables, views, materialized views      | `DBA_TABLES` (`NUM_ROWS` as `rowCountEstimate`, from optimizer statistics), `DBA_VIEWS`, `DBA_MVIEWS`, `DBA_OBJECTS` (`LAST_DDL_TIME`, `STATUS`, `CREATED`) | DICTIONARY |
 | Columns                                | `DBA_TAB_COLUMNS` (`DATA_TYPE`, `DATA_LENGTH`, `DATA_PRECISION`, `DATA_SCALE`, `NULLABLE`, `DATA_DEFAULT`), `DBA_TAB_COMMENTS`, `DBA_COL_COMMENTS` | DICTIONARY |
-| Routines                               | `DBA_OBJECTS` (`PROCEDURE`, `FUNCTION`, `PACKAGE`, `PACKAGE BODY`, `TRIGGER`), `DBA_PROCEDURES` (package members → `PKG.PROC` names), `DBA_ARGUMENTS` (signatures, REF CURSOR OUT detection) | DICTIONARY |
+| Routines                               | `DBA_OBJECTS` (`PROCEDURE`, `FUNCTION`, `PACKAGE`, `PACKAGE BODY`, `TRIGGER`), `DBA_PROCEDURES` (package members → `PKG.PROC` names) | DICTIONARY |
 | Triggers                               | `DBA_TRIGGERS` (`TABLE_OWNER`, `TABLE_NAME`, `TRIGGERING_EVENT`, `TRIGGER_TYPE`, `STATUS`) → `Routine.kind = TRIGGER`, `triggerTableId`, `triggerEvent`, `Dependency T TRIGGERS G` | DICTIONARY |
-| Foreign keys                           | `DBA_CONSTRAINTS` (`CONSTRAINT_TYPE = 'R'`, `R_CONSTRAINT_NAME`) joined with `DBA_CONS_COLUMNS` → `Dependency T1 FOREIGN_KEY T2` | DICTIONARY |
+| Foreign keys                           | `DBA_CONSTRAINTS` (`CONSTRAINT_TYPE = 'R'`) self-joined on `R_OWNER`/`R_CONSTRAINT_NAME` to the referenced table → `Dependency T1 FOREIGN_KEY T2` (table level; columns are not recorded) | DICTIONARY |
 | Static dependencies                    | `DBA_DEPENDENCIES` (routine/view/trigger → table/routine) → `Dependency R REFERENCES T` / `R CALLS R2`         | DICTIONARY |
 | READ/WRITE refinement                  | `DBA_SOURCE` (package bodies, procedures, triggers) scanned by the SQL analyser → `REFERENCES` upgraded to `READS`/`WRITES` with confidence 0.8 | DICTIONARY |
-| Sessions                               | `V$SESSION` (`SID`, `SERIAL#`, `USERNAME`, `STATUS`, `PROGRAM`, `MACHINE`, `OSUSER`, `MODULE`, `ACTION`, `CLIENT_IDENTIFIER`, `PORT`, `LOGON_TIME`, `SQL_ID`, `PREV_SQL_ID`, `TYPE = 'USER'`) | RUNTIME |
+| Sessions                               | `V$SESSION` (`SID`, `SERIAL#`, `USERNAME`, `STATUS`, `PROGRAM`, `MACHINE`, `OSUSER`, `MODULE`, `ACTION`, `CLIENT_IDENTIFIER`, `PORT`, `SERVICE_NAME`, `LOGON_TIME`, `SQL_ID`, `PREV_SQL_ID`, `SQL_EXEC_START`, `TYPE = 'USER'`) | RUNTIME |
 | SQL text and touched objects           | `V$SQL` (`SQL_ID`, `SQL_FULLTEXT`, `EXECUTIONS`, `ELAPSED_TIME`, `PARSING_SCHEMA_NAME`), `V$SQL_PLAN` (`OBJECT_OWNER`, `OBJECT_NAME`, `OBJECT_TYPE`, `OPERATION`) | RUNTIME |
-| Audit trail (optional)                 | `UNIFIED_AUDIT_TRAIL` (`EVENT_TIMESTAMP`, `DBUSERNAME`, `CLIENT_PROGRAM_NAME`, `USERHOST`, `OS_USERNAME`, `CLIENT_IDENTIFIER`, `OBJECT_SCHEMA`, `OBJECT_NAME`, `ACTION_NAME`, `SQL_TEXT`) | AUDIT |
-| Resource limits (for capacity)         | `V$RESOURCE_LIMIT` (`processes`, `sessions`)                                                                     | RUNTIME    |
+| Audit trail (optional)                 | `UNIFIED_AUDIT_TRAIL` (`EVENT_TIMESTAMP`, `DBUSERNAME`, `CLIENT_PROGRAM_NAME`, `USERHOST`, `OS_USERNAME`, `ACTION_NAME`, `OBJECT_SCHEMA`, `OBJECT_NAME`, `SQL_TEXT`, `SESSIONID`), read incrementally by `EVENT_TIMESTAMP`, at most `DBP_COLLECTOR_MAX_SQL_PER_SAMPLE` rows per run | AUDIT |
 
 `DBA_*` versus `ALL_*`: the collector account has no object privileges on application tables, so the
 `ALL_*` views would show it almost nothing. `SELECT_CATALOG_ROLE`/`SELECT ANY DICTIONARY` make the
 `DBA_*` views readable without granting access to table data, which is why the collector uses them.
-If the collector runs as the schema owner itself (not recommended), `ALL_*` would be sufficient.
+When a `DBA_*` view is not readable (`ORA-00942`) the crawler falls back to the matching `ALL_*` view,
+which only shows objects the account has privileges on — fine if the collector runs as the schema owner
+itself (not recommended), nearly empty otherwise. Database session limits (`V$RESOURCE_LIMIT`) are not
+collected; they remain a DBA-side check ([operations.md](operations.md#capacity-planning)).
 
 ### Privileges
 
@@ -58,13 +69,13 @@ In a multitenant database, create the user inside the PDB that is registered as 
 | Setting                      | Guidance                                                                                                               |
 |------------------------------|------------------------------------------------------------------------------------------------------------------------|
 | `dictionaryIntervalSeconds`  | 3600 for most estates; the crawl is cheap on dictionary views but `DBA_SOURCE` scanning of large package bodies takes time; run it off-peak and after deployments (`POST …/collect`) |
-| `runtimeIntervalSeconds`     | 10–30. Each run is a handful of `V$` queries; the cost is independent of application load. Below 5 s adds little because `V$SESSION.SQL_ID` already changes faster than any sampler can follow |
+| `runtimeIntervalSeconds`     | 10–30 (default 15). Each run is one `V$SESSION` query plus `V$SQL`/`V$SQL_PLAN` lookups for at most `DBP_COLLECTOR_MAX_SQL_PER_SAMPLE` new `SQL_ID`s; the cost is independent of application load. Below the scheduler tick (`DBP_COLLECTOR_TICK_SECONDS`, 5 s) it cannot run more often, and `V$SESSION.SQL_ID` already changes faster than any sampler can follow |
 | Audit                        | Reads only rows newer than the last watermark (`EVENT_TIMESTAMP`); make sure the unified audit trail is purged by the DBA (`DBMS_AUDIT_MGMT`) so it does not grow unbounded |
 
 ### Licence notes
 
-* `V$SESSION`, `V$SQL`, `V$SQL_PLAN`, `V$RESOURCE_LIMIT`, the `DBA_*` dictionary views and
-  `UNIFIED_AUDIT_TRAIL` are part of every Oracle Database edition and need **no extra option or pack**.
+* `V$SESSION`, `V$SQL`, `V$SQL_PLAN`, the `DBA_*` dictionary views and `UNIFIED_AUDIT_TRAIL` are part of
+  every Oracle Database edition and need **no extra option or pack**.
 * **Deliberately not used**: `V$ACTIVE_SESSION_HISTORY` (ASH), `DBA_HIST_*` (AWR), `DBA_HIST_ACTIVE_SESS_HISTORY`,
   and the `DBMS_WORKLOAD_REPOSITORY` APIs. They require the Diagnostics Pack (an Enterprise Edition
   option) and querying them can count as use of the pack. The platform's sampling of `V$SESSION` is a
@@ -81,17 +92,16 @@ In a multitenant database, create the user inside the PDB that is registered as 
 
 | Data                              | Catalog / view                                                                                                        | Kind       |
 |-----------------------------------|-----------------------------------------------------------------------------------------------------------------------|------------|
-| Tables, views, materialized views | `pg_class` (`relkind` r/p/v/m, `reltuples` as estimate), `pg_namespace`, `pg_description`                               | DICTIONARY |
-| Row estimates / activity          | `pg_stat_user_tables` (`n_live_tup`, `seq_scan`, `idx_scan`, `n_tup_ins/upd/del`, `last_autoanalyze`)                | DICTIONARY |
-| Columns                           | `pg_attribute`, `pg_attrdef`, `pg_type`, `format_type()`                                                               | DICTIONARY |
-| Routines                          | `pg_proc` (`prokind` f/p, `prosrc`, `pg_get_functiondef()`), `pg_language`                                             | DICTIONARY |
+| Tables, views, materialized views | `information_schema.tables` (base tables and views), `pg_matviews` (definition), `pg_class` + `pg_namespace` (`reltuples` as the row estimate, `relkind`), `pg_description` (comments) | DICTIONARY |
+| Row estimates / activity          | `pg_stat_user_tables` (`n_live_tup`, `last_autoanalyze`)                                                                | DICTIONARY |
+| Columns                           | `information_schema.columns` (`data_type`, `character_maximum_length`, `numeric_precision/scale`, `is_nullable`, `column_default`), `pg_attribute` + `pg_description` for column comments | DICTIONARY |
+| Routines                          | `pg_proc` (`prokind` f/p, `prosrc`, argument names/types), `pg_language`                                                | DICTIONARY |
 | Triggers                          | `pg_trigger` (`tgrelid`, `tgfoid`, `tgtype` → event), excluding internal constraint triggers                           | DICTIONARY |
-| Foreign keys                      | `pg_constraint` (`contype = 'f'`, `conrelid`, `confrelid`, `conkey`, `confkey`)                                        | DICTIONARY |
-| View dependencies                 | `pg_depend` + `pg_rewrite` (view → underlying tables)                                                                   | DICTIONARY |
+| Foreign keys                      | `pg_constraint` (`contype = 'f'`, `conrelid`, `confrelid`)                                                             | DICTIONARY |
+| View dependencies                 | `pg_views.definition` / `pg_matviews.definition` parsed by the SQL analyser → view `REFERENCES`/`READS` base tables  | DICTIONARY |
 | Routine → table dependencies      | **Not tracked by the engine** for function bodies: derived by scanning `prosrc` with the SQL analyser (confidence 0.8) | DICTIONARY |
-| Sessions                          | `pg_stat_activity` (`pid`, `datname`, `usename`, `application_name`, `client_addr`, `client_port`, `backend_start`, `xact_start`, `query_start`, `state`, `query`, `backend_type = 'client backend'`) | RUNTIME |
-| Statement statistics (optional)   | `pg_stat_statements` (`queryid`, `query`, `calls`, `total_exec_time`, `rows`, `userid`, `dbid`)                        | RUNTIME    |
-| Limits                            | `SHOW max_connections`, `pg_settings`                                                                                   | RUNTIME    |
+| Sessions                          | `pg_stat_activity` (`pid`, `datname`, `usename`, `application_name`, `client_addr`, `client_port`, `backend_start`, `state`, `query`, `query_start`; `backend_type = 'client backend'`, the collector's own `pg_backend_pid()` excluded) | RUNTIME |
+| Statement statistics (optional)   | `pg_stat_statements` (`queryid`, `query`, `calls`, `total_exec_time`, `rows`) when `pg_extension` shows it installed      | RUNTIME    |
 
 Attribution on PostgreSQL relies on `pg_stat_activity.application_name` (identity rule
 `pgApplicationNames`), `client_addr` (CIDR) and `client_port` (proxy correlation). `pg_stat_statements`
@@ -102,11 +112,12 @@ for hot-query statistics, not for relationships.
 
 `pg_monitor` role (`pg_read_all_stats` is the part that matters: without it `pg_stat_activity.query` is
 hidden for other users' sessions). `pg_stat_statements` requires the extension to be created in the
-database and loaded via `shared_preload_libraries`.
+database and loaded via `shared_preload_libraries`; `max_connections` is not read (DBA-side check).
 
 ### Interval guidance
 
-Same as Oracle. `pg_stat_activity` snapshots are cheap; `pg_stat_statements` is read incrementally.
+Same as Oracle. `pg_stat_activity` snapshots are cheap; `pg_stat_statements` is read incrementally
+(`DBP_COLLECTOR_MAX_SQL_PER_SAMPLE` new statements per run).
 
 ### Licence notes
 
@@ -119,15 +130,18 @@ server. Managed services may restrict `shared_preload_libraries` changes.
 
 | Data                       | Views / DMVs                                                                                                                     | Kind       |
 |----------------------------|----------------------------------------------------------------------------------------------------------------------------------|------------|
-| Tables, views              | `sys.tables`, `sys.views`, `sys.schemas`, `sys.objects` (`modify_date` → `lastDdlAt`), `sys.extended_properties` (`MS_Description`) | DICTIONARY |
-| Row estimates              | `sys.dm_db_partition_stats` (`row_count` for index_id 0/1)                                                                       | DICTIONARY |
+| Tables, views              | `sys.tables`, `sys.views`, `sys.schemas`, `sys.objects` (`modify_date` → `lastDdlAt`)                                            | DICTIONARY |
+| Row estimates              | `sys.partitions` (`rows` for index_id 0/1)                                                                                       | DICTIONARY |
 | Columns                    | `sys.columns`, `sys.types`, `sys.default_constraints`                                                                            | DICTIONARY |
 | Routines                   | `sys.procedures`, `sys.objects` (`type IN ('FN','IF','TF','P','TR')`), `sys.sql_modules.definition` (needs `VIEW DEFINITION`)    | DICTIONARY |
 | Triggers                   | `sys.triggers` (`parent_id`, `is_disabled`), `sys.trigger_events`                                                                 | DICTIONARY |
-| Foreign keys               | `sys.foreign_keys`, `sys.foreign_key_columns`                                                                                    | DICTIONARY |
+| Foreign keys               | `sys.foreign_keys` (`parent_object_id` → `referenced_object_id`, table level)                                                     | DICTIONARY |
 | Static dependencies        | `sys.sql_expression_dependencies` (`referencing_id` → `referenced_id`), refined by scanning `sys.sql_modules.definition`         | DICTIONARY |
 | Sessions                   | `sys.dm_exec_sessions` (`session_id`, `login_name`, `host_name`, `program_name`, `client_interface_name`, `status`, `login_time`), `sys.dm_exec_connections` (`client_net_address`, `client_tcp_port`), `sys.dm_exec_requests` (`sql_handle`, `statement_start_offset`) | RUNTIME |
-| SQL text / plans           | `sys.dm_exec_sql_text(sql_handle)`, `sys.dm_exec_query_stats`, optionally `sys.dm_exec_query_plan` (object names from the plan XML) | RUNTIME |
+| SQL text                   | `sys.dm_exec_sql_text(sql_handle)`; table references come from the SQL analyser (no plan XML is read)                           | RUNTIME |
+
+Table and column comments (`sys.extended_properties`) and query statistics (`sys.dm_exec_query_stats`)
+are not collected in the POC.
 
 ### Privileges
 
@@ -148,8 +162,8 @@ sources, in order of precedence when several apply to the same observation:
 | Precedence | Source                | How the application is identified                                                                            | Confidence | Misses                                                        |
 |-----------:|-----------------------|--------------------------------------------------------------------------------------------------------------|-----------:|---------------------------------------------------------------|
 | 1          | `GATEWAY`             | Authenticated api key; every statement reported by the gateway                                               | 1.0        | Nothing (all statements)                                      |
-| 2          | `COLLECTOR_AUDIT`     | Audit row's `CLIENT_PROGRAM_NAME` / `USERHOST` / `CLIENT_IDENTIFIER` matched against identity rules; object and action are exact | 1.0 | Statements outside the audit policies                 |
-| 3          | `PROXY_CORRELATION`   | `V$SESSION.PORT` (or `pg_stat_activity.client_port`, `sys.dm_exec_connections.client_tcp_port`) = `ConnectionEvent.proxyLocalPort` of a proxied connection whose identity the proxy resolved; tables from `V$SQL_PLAN` / parsed SQL text of the sampled `SQL_ID` | 0.9 | Statements shorter than the sampling interval            |
+| 2          | `COLLECTOR_AUDIT`     | Audit row's `CLIENT_PROGRAM_NAME` / `USERHOST` / `OS_USERNAME` matched against identity rules (`programNames` → `machinePatterns`; no port, so no proxy correlation); object and action are exact | 1.0 | Statements outside the audit policies; Oracle only in the POC |
+| 3          | `PROXY_CORRELATION`   | `V$SESSION.PORT` (or `pg_stat_activity.client_port`, `sys.dm_exec_connections.client_tcp_port`) = `proxyLocalPort` of a live proxied connection to the same backend (from `ConnectionEvent`s and heartbeat snapshots); tables from `V$SQL_PLAN` when available, else the parsed SQL text of the sampled `SQL_ID` | 0.9 | Statements shorter than the sampling interval            |
 | 4          | `COLLECTOR_SESSION`   | `V$SESSION.PROGRAM` / `MACHINE` / `OSUSER` / `MODULE` (or `application_name`, `program_name`, `client_addr`) matched against identity rules | 0.6 | Short statements; ambiguous rules (shared program names, wide CIDRs) |
 | –          | `DECLARED`            | A human created it                                                                                            | 1.0        | –                                                             |
 
@@ -173,6 +187,9 @@ source is kept; the UI and the impact report show the best confidence and the su
   proxy (direct connection) there is no `ConnectionEvent` to join and only identity rules apply.
 * Dictionary refinement of `REFERENCES` into `READS`/`WRITES` by scanning source is heuristic (dynamic
   SQL, `EXECUTE IMMEDIATE`, synonyms). Hence 0.8.
+* Runtime samples only ever attach to **catalogued** tables: a sampled session never creates a
+  placeholder table (gateway telemetry does, see below), so run a dictionary crawl before expecting
+  `COLLECTOR_SESSION` / `PROXY_CORRELATION` relationships.
 * Collectors see what the database shows them: a proxied connection has the proxy's address as
   `client_addr`, so CIDR rules must point at application subnets only for direct connections, and the
   `MACHINE`/`host_name` values (reported by the client itself) remain the better signal.
@@ -232,7 +249,7 @@ users. These are configuration-only fixes in the application's connection settin
 | Oracle, any client             | Service alias in the connect string: `SERVICE_NAME=sales.orders-service` through the proxy                   | proxy `requestedService`                         | `serviceAliases` (exact, highest precedence) |
 | PostgreSQL JDBC                | URL/property `ApplicationName=orders-service` (pgjdbc), or `application_name` in libpq-based clients; `Connection.setClientInfo("ApplicationName", …)` | `pg_stat_activity.application_name`, startup packet (proxy sees it) | `pgApplicationNames` |
 | SQL Server JDBC                | `applicationName=orders-service` connection property                                                          | `sys.dm_exec_sessions.program_name` (LOGIN7 packet; hidden from the proxy when encrypted) | `programNames` |
-| Any (through the gateway)      | `clientInfo.ApplicationName=…` in the `jdbc:dbp://` URL                                                      | `QueryEvent.clientInfo`, forwarded to the physical session | not needed: api key identifies the app |
+| Any (through the gateway)      | `clientInfo.ApplicationName=…` in the `jdbc:dbp://` URL, or `Connection.setClientInfo` per request (`action`, `traceparent`, …; see [request-level tracing](operations.md#request-level-tracing)) | `QueryEvent.clientInfo`, forwarded to the physical session (Oracle `OCSID.MODULE/CLIENTID/ACTION`) | not needed: api key identifies the app |
 | Kubernetes                     | One subnet/namespace CIDR per application tier                                                                | `client_addr`, listener peer address             | `cidrs` (last resort)         |
 
 Rule of thumb: the closer the identity is set to the application (api key > service alias > program
@@ -275,9 +292,9 @@ flowchart LR
 5. **Entry points** — routines with callers but no PL/SQL callers of their own are the migration unit:
    `GET /routines/{id}/summary` lists `callers` (applications) and `tables`.
 
-Known gaps: dynamic SQL built at runtime, synonyms resolved only when `DBA_SYNONYMS` is crawled
-(the collector resolves public and private synonyms to their targets), `INVALID` objects (status is
-recorded; dependencies of invalid objects may be stale).
+Known gaps: dynamic SQL built at runtime; synonyms (`DBA_SYNONYMS` is not crawled in the POC, so a
+synonym referenced in SQL surfaces as a placeholder table named like the synonym); `INVALID` objects
+(status is recorded; dependencies of invalid objects may be stale).
 
 ## Reconciling discovered placeholder tables
 
@@ -290,7 +307,7 @@ control plane then creates a **placeholder** table (`discovered: true`, `lastDdl
 |--------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
 | Crawl finds `SCHEMA.NAME` matching the placeholder                   | Placeholder is merged into the real row (same id kept, `discovered` cleared, columns/kind filled); relationships follow |
 | Event had no schema; `defaultSchema` of the session identifies the table | Resolved at ingestion using the session's default schema; otherwise against the crawled catalogue by unique unqualified name |
-| Name is a synonym                                                   | Resolved via `DBA_SYNONYMS` to the target table; the placeholder is merged into the target                             |
+| Name is a synonym                                                   | Not resolved in the POC (`DBA_SYNONYMS` is not crawled): the placeholder stays and can be mapped by hand                 |
 | Name matches nothing after N crawls (dropped table, temp table, typo) | Stays `discovered: true`; listed in the UI as "unresolved"; can be deleted or mapped by hand (`PUT /tables/{id}`)      |
 | Table is created later                                              | Merge on first crawl that sees it                                                                                     |
 

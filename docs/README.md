@@ -34,6 +34,13 @@ Written for platform engineers and DBAs; vendor- and company-neutral, demo domai
 | [compatibility.md](compatibility.md) | What JDBC features work through the gateway/driver and what does not, pool-mode semantics, framework notes, driver-vs-proxy decision table. |
 | [migration-playbook.md](migration-playbook.md) | Oracle → PostgreSQL per datasource: readiness checklist, SQL hotspots flagged by telemetry, pilot with routing rules, verification, switch, rollback, retirement, rewrite table. |
 
+## Validation
+
+| Document | One line |
+|----------|----------|
+| [validation-report.md](validation-report.md) | What was verified end to end against the final implementation, how, and what remains open. |
+| `../dbp-integration-tests/` | Maven module that starts an embedded PostgreSQL, the control plane, a gateway and a proxy as real processes and exercises them only through the public JDBC driver and the REST API (`mvn -f dbp-integration-tests/pom.xml verify`; bootstrap, gateway, driver, Hikari pool and batch-load scenarios). |
+
 ## Architecture decision records
 
 | ADR | Decision |
@@ -54,6 +61,9 @@ Written for platform engineers and DBAs; vendor- and company-neutral, demo domai
 
 * Contracts (`wire-protocol.md`, `control-plane-api.md`, `telemetry-events.md`, `metadata-model.md`)
   are edited by the integrator; code follows them. If a guide and a contract disagree, the contract wins.
+* Configuration names, defaults, metric names and admin endpoints in the guides are taken from the
+  module READMEs (`dbp-gateway`, `dbp-proxy`, `dbp-control-plane`, `dbp-jdbc`, `dbp-common`), which
+  describe what was built; the guides consolidate, the READMEs are authoritative.
 * Terminology follows [glossary.md](glossary.md). Benchmarks are not quoted; where a number depends on
   the environment the documents say "to be measured".
 * Licensing statements about vendor products are guidance only; check your own licence terms.

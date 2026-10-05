@@ -25,8 +25,8 @@ COPY . .
 COPY --from=ui /ui/dist/ dbp-control-plane/src/main/resources/static/
 RUN --mount=type=cache,target=/root/.m2 \
     mvn -q -B -pl dbp-control-plane -am -DskipTests package \
- && ls dbp-control-plane/target/*.jar \
- && unzip -l dbp-control-plane/target/dbp-control-plane-*.jar | grep -q 'BOOT-INF/classes/static/index.html'
+ && ls -l dbp-control-plane/target/dbp-control-plane.jar \
+ && unzip -l dbp-control-plane/target/dbp-control-plane.jar | grep -q 'BOOT-INF/classes/static/index.html'
 
 # ---------------------------------------------------------------------------
 # Stage 3: runtime
@@ -38,10 +38,11 @@ RUN apt-get update \
  && useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin dbp \
  && mkdir -p /app/data && chown -R dbp:dbp /app
 WORKDIR /app
-COPY --from=build --chown=dbp:dbp /src/dbp-control-plane/target/dbp-control-plane-*.jar /app/app.jar
+# the module's pom sets <finalName>dbp-control-plane</finalName>: the Spring Boot jar is target/dbp-control-plane.jar
+COPY --from=build --chown=dbp:dbp /src/dbp-control-plane/target/dbp-control-plane.jar /app/app.jar
 USER dbp
 ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError -Djava.security.egd=file:/dev/./urandom" \
-    SERVER_PORT=8080
+    DBP_PORT=8080
 # /app/data holds the H2 file when the dev profile is used instead of PostgreSQL
 VOLUME ["/app/data"]
 EXPOSE 8080

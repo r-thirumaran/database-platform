@@ -26,8 +26,9 @@ Then:
 | http://localhost:8092 | orders-service **proxy** (Oracle thin → `proxy:1521/sales.orders-service`) |
 | http://localhost:8093 | orders-service **gateway** (`jdbc:dbp://gateway:7420/sales`, API key from bootstrap) |
 | http://localhost:8094 | legacy-reporting (Oracle thin → `proxy:1521/sales.legacy-reporting`) |
-| http://localhost:7421/health, /metrics, /sessions | gateway admin |
-| http://localhost:7431/health, /metrics, /connections | proxy admin |
+| http://localhost:7421/health, /metrics, /sessions, /pools | gateway admin (no authentication) |
+| http://localhost:7431/health, /metrics | proxy admin (open) |
+| http://localhost:7431/connections, /config | proxy admin — need `-H "X-DBP-Service-Token: $DBP_SERVICE_TOKEN"` (`dev-service-token` unless changed in `.env`), because compose sets `DBP_SERVICE_TOKEN` on the proxy |
 | http://localhost:9090 | Prometheus (profile `monitoring`) |
 | http://localhost:3000 | Grafana, dashboard "DBP overview" (profile `monitoring`, admin / `GRAFANA_ADMIN_PASSWORD`) |
 | localhost:1521 / localhost:5432 | **proxy** listeners (Oracle / PostgreSQL protocol) |
@@ -71,7 +72,7 @@ flowchart LR
 | `postgres` | core | `postgres:17` | databases `dbp` (control-plane metadata) and `sales`; `pg_stat_statements` preloaded; host port 5433 |
 | `control-plane` | core | built from `docker/Dockerfile.control-plane` | Spring profile `postgres`, serves the UI, resolves `ENV` credentials from its own environment |
 | `gateway` | core | `docker/Dockerfile.gateway` | `DBP_GATEWAY_ID=gw-1`, ports 7420/7421 |
-| `proxy` | core | `docker/Dockerfile.proxy` | `DBP_PROXY_ID=proxy-1`, owns host ports 1521 and 5432, admin 7431 |
+| `proxy` | core | `docker/Dockerfile.proxy` | `DBP_PROXY_ID=proxy-1`, owns host ports 1521 and 5432, admin 7431; `DBP_PROXY_STRICT_ALIASES` / `DBP_PROXY_UNKNOWN_APP_MAX_CONNECTIONS` from `.env` |
 | `bootstrap` | core | `curlimages/curl` | one-shot: `bootstrap/bootstrap.sh` imports `bootstrap/platform-config.json`, creates API keys → `.generated/examples.env`, triggers dictionary crawls |
 | `orders-service-{direct,proxy,gateway}` | examples | `dbp-examples/orders-service/Dockerfile` | same image, different `SPRING_PROFILES_ACTIVE`; ports 8091/8092/8093 |
 | `legacy-reporting` | examples | `dbp-examples/legacy-reporting/Dockerfile` | port 8094 |
@@ -123,7 +124,7 @@ pool size (8) in `platform-config.json`: 20+ logical sessions, ≤ 8 physical co
 
 | Dockerfile | Stages | Result |
 |------------|--------|--------|
-| `docker/Dockerfile.control-plane` | `node:22-alpine` builds `dbp-ui` → `maven:3.9-eclipse-temurin-21` copies `dist/` into `dbp-control-plane/src/main/resources/static` and runs `mvn -pl dbp-control-plane -am package` → `eclipse-temurin:21-jre` | one jar serving API and UI; the build fails if `static/index.html` is not in the jar |
+| `docker/Dockerfile.control-plane` | `node:22-alpine` builds `dbp-ui` → `maven:3.9-eclipse-temurin-21` copies `dist/` into `dbp-control-plane/src/main/resources/static` and runs `mvn -pl dbp-control-plane -am package` → `eclipse-temurin:21-jre` | `target/dbp-control-plane.jar` (pom `finalName`, no version suffix) serving API and UI; the build fails if `static/index.html` is not in the jar |
 | `docker/Dockerfile.gateway` | Maven → JRE | `dbp-gateway-<ver>-all.jar` |
 | `docker/Dockerfile.proxy` | Maven → JRE | `dbp-proxy-<ver>-all.jar` |
 | `dbp-examples/*/Dockerfile` | Maven → JRE | example jars; `orders-service` and `reporting-batch` bundle `dbp-jdbc` |
@@ -150,15 +151,41 @@ The databases are expected outside the cluster (or in their own manifests); set 
 `helm/dbp/` is the same as a chart: `helm install dbp deploy/helm/dbp -n dbp --create-namespace
 --set secrets.serviceToken=... --set networkPolicy.enabled=true --set 'networkPolicy.databaseCidrs={10.1.2.0/24}'`.
 
+Probes: control plane `GET /actuator/health` (startup), `/actuator/health/readiness` and
+`/actuator/health/liveness` (Spring probes are enabled); gateway `GET :7421/health` (startup/readiness)
+and a TCP check on 7420 (liveness); proxy `GET :7431/health` and a TCP check on 1521. The proxy's
+`/health` and `/metrics` never require the service token, so probes and Prometheus need no header.
+
+### Where each component can run
+
+| Component | Needs | Fits | Does not fit |
+|-----------|-------|------|--------------|
+| control plane + UI | HTTP 8080, a PostgreSQL, a network path to the databases (collectors) | any container platform: Kubernetes, VMs, ECS/Fargate, Azure Container Apps, **Cloud Run** (min instances 1, VPC connector / Direct VPC egress to the databases, Cloud SQL as metadata store) | – |
+| gateway | raw TCP 7420 (+ HTTP 7421 for probes/metrics), long-running | Kubernetes Service, VMs, ECS/Fargate behind a **Network Load Balancer**, Azure Container Apps with **TCP ingress** | **Cloud Run** and other HTTP-only serverless platforms (no TCP ingress) |
+| proxy | raw TCP 1521/5432/1433 (+ HTTP 7431) | same as the gateway | Cloud Run, HTTP-only platforms |
+| applications with the driver | a TCP route to the gateway | anywhere — on **Cloud Run** they reach the gateway's internal address through the Serverless VPC Access connector | – |
+
+Sizing (module READMEs): gateway and proxy 300–500 MB RAM each, 4 cores drive a few hundred logical
+sessions (the physical pool is the bottleneck); control plane 600–900 MB plus PostgreSQL. The manifests
+request 512 Mi / 0.5 CPU (gateway), 384 Mi / 0.25 CPU (proxy), 768 Mi / 0.25 CPU (control plane).
+Full table in [`docs/operations.md`](../docs/operations.md#where-each-component-can-run).
+
 ## Monitoring
 
-`monitoring/prometheus.yml` scrapes the control plane (`/actuator/prometheus`), gateway
-(`:7421/metrics`), proxy (`:7431/metrics`) and the example applications (HikariCP metrics). Grafana is
-provisioned with the Prometheus datasource and `monitoring/grafana/dashboards/dbp-overview.json`
-(connections through proxy and gateway, logical vs physical, statements/s, latency, pools, client-side
-Hikari pools). Metric names follow the `dbp_gateway_*` / `dbp_proxy_*` convention of the components;
-adjust the panel queries if a component names them differently (the dashboard's first panel lists
-the expected names).
+`monitoring/prometheus.yml` scrapes the control plane (`/actuator/prometheus`: Spring Boot defaults —
+`http_server_requests_*`, `hikaricp_*`, `jvm_*`; no custom `dbp_*` meters in the POC), the gateway
+(`:7421/metrics`: `dbp_gateway_logical_sessions`, `dbp_gateway_pinned_sessions`,
+`dbp_gateway_pool_{active,idle,waiting,total,max}` by `datasource`, `dbp_gateway_statements_total`
+by `datasource,operation,success`, `dbp_gateway_statement_duration_seconds` histogram,
+`dbp_gateway_errors_total{sqlstate}`, `dbp_gateway_telemetry_dropped_total`), the proxy
+(`:7431/metrics`: `dbp_proxy_connections_active{listener,application,datasource,backend}`,
+`dbp_proxy_connections_live`, `dbp_proxy_connections_{accepted,refused,failed}_total`,
+`dbp_proxy_bytes_{in,out}_bytes_total`, `dbp_proxy_backend_connect_seconds`,
+`dbp_proxy_telemetry_events_dropped`) and the three `orders-service` variants (HikariCP metrics;
+`legacy-reporting` has no Prometheus registry). Grafana is provisioned with the Prometheus datasource and
+`monitoring/grafana/dashboards/dbp-overview.json` (connections through proxy and gateway, logical vs
+physical, statements/s, latency, pools, client-side Hikari pools, control plane HTTP/JVM). The exact
+names are listed in [`docs/operations.md`](../docs/operations.md#metrics-catalogue).
 
 ## Troubleshooting
 
@@ -178,8 +205,14 @@ the expected names).
 * **orders-service-gateway logs `no API key found`.** Bootstrap did not finish: `docker compose logs
   bootstrap`. Usually the control plane rejected the import (contract mismatch) — fix
   `bootstrap/platform-config.json` and re-run `docker compose --profile core run --rm bootstrap`.
-* **Gateway returns `401`/`403` to the examples.** API key unknown (keys were regenerated after the
+* **Gateway returns `08004` to the examples.** API key unknown (keys were regenerated after the
   app started → restart the app) or no enabled access grant for the datasource.
+* **`401` from `curl localhost:7431/connections`.** Expected: compose sets `DBP_SERVICE_TOKEN` on the
+  proxy, so `/connections` and `/config` require `-H "X-DBP-Service-Token: $DBP_SERVICE_TOKEN"`.
+  Live connections are also on the portal (Connections page) without a token.
+* **`healthcheck`/`GET :7431/health` says `DEGRADED`.** A proxy listener could not bind (host port
+  clash inside the container is impossible, but a misconfigured static file can be) or stopped
+  accepting; it is re-bound on the next config poll. The body lists the listeners and their errors.
 * **`healthcheck.sh` of Oracle stays unhealthy for a long time.** Normal during the first minutes;
   if it never turns healthy check memory (`docker stats`) and the Oracle log.
 * **Build is slow.** Images build the full Maven reactor each time; the Dockerfiles use BuildKit
