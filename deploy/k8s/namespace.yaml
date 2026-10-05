@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dbp
+  labels:
+    app.kubernetes.io/name: dbp
+    # pods in this namespace may be selected by the database NetworkPolicy of other namespaces
+    dbp.io/platform: "true"

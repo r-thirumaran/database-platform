@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dbp.fullname" . }}-config
+  labels:
+    {{- include "dbp.labels" . | nindent 4 }}
+data:
+  SPRING_PROFILES_ACTIVE: {{ .Values.controlPlane.springProfile | quote }}
+  DBP_DB_URL: {{ .Values.config.metadataDb.url | quote }}
+  DBP_DB_USER: {{ .Values.config.metadataDb.user | quote }}
+  DBP_DB_USERNAME: {{ .Values.config.metadataDb.user | quote }}
+  DBP_SECURITY_MODE: {{ .Values.config.securityMode | quote }}
+  DBP_DEMO_SEED_ENABLED: {{ .Values.config.demoSeedEnabled | quote }}
+  DBP_TELEMETRY_RETENTION_HOURS: {{ .Values.config.telemetryRetentionHours | quote }}
+  DBP_GOVERNANCE_INTERVAL_SECONDS: {{ .Values.config.governanceIntervalSeconds | quote }}
+  DBP_TELEMETRY_FLUSH_MS: {{ .Values.config.telemetryFlushMs | quote }}
+  DBP_CONTROL_PLANE_URL: {{ include "dbp.controlPlaneUrl" . | quote }}
+  DBP_GATEWAY_PORT: {{ .Values.gateway.port | quote }}
+  DBP_GATEWAY_ADMIN_PORT: {{ .Values.gateway.adminPort | quote }}
+  DBP_PROXY_ADMIN_PORT: {{ .Values.proxy.ports.admin | quote }}

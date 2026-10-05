@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dbp-gateway
+  namespace: dbp
+  labels:
+    app.kubernetes.io/name: dbp-gateway
+    dbp.io/component: gateway
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dbp-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dbp-gateway
+        dbp.io/component: gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "7421"
+        prometheus.io/path: /metrics
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # drain sessions before the pod goes away
+      terminationGracePeriodSeconds: 60
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: dbp-gateway
+      containers:
+        - name: gateway
+          image: dbp/gateway:0.1.0-SNAPSHOT
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: wire
+              containerPort: 7420
+            - name: admin
+              containerPort: 7421
+          env:
+            - name: DBP_GATEWAY_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: DBP_CONTROL_PLANE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: dbp-config
+                  key: DBP_CONTROL_PLANE_URL
+            - name: DBP_TELEMETRY_FLUSH_MS
+              valueFrom:
+                configMapKeyRef:
+                  name: dbp-config
+                  key: DBP_TELEMETRY_FLUSH_MS
+            - name: DBP_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dbp-secrets
+                  key: DBP_SERVICE_TOKEN
+            - name: JAVA_TOOL_OPTIONS
+              value: "-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: admin
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: admin
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: wire
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dbp-gateway
+  namespace: dbp
+  labels:
+    app.kubernetes.io/name: dbp-gateway
+spec:
+  type: ClusterIP
+  # applications connect with jdbc:dbp://dbp-gateway.dbp.svc.cluster.local:7420/<datasource>
+  selector:
+    app.kubernetes.io/name: dbp-gateway
+  ports:
+    - name: wire
+      port: 7420
+      targetPort: wire
+    - name: admin
+      port: 7421
+      targetPort: admin

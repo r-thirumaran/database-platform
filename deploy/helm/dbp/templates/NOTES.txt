@@ -1,0 +1,25 @@
+Database Access Platform ({{ .Chart.Name }}-{{ .Chart.Version }}) deployed to namespace {{ .Release.Namespace }}.
+
+Control plane (API + UI):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "dbp.fullname" . }}-control-plane {{ .Values.controlPlane.service.port }}:{{ .Values.controlPlane.service.port }}
+  open http://localhost:{{ .Values.controlPlane.service.port }}
+
+Import the platform configuration (teams, applications, databases, datasources, grants):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "dbp.fullname" . }}-control-plane 8080:{{ .Values.controlPlane.service.port }} &
+  curl -X POST -H 'Content-Type: application/json' --data-binary @deploy/bootstrap/platform-config.json http://localhost:8080/api/v1/import
+
+Applications:
+  gateway (platform driver): jdbc:dbp://{{ include "dbp.fullname" . }}-gateway.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.port }}/<datasource>?apiKey=dbp_...
+  proxy (unchanged drivers): jdbc:oracle:thin:@//{{ include "dbp.fullname" . }}-proxy.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.proxy.ports.oracle }}/<datasource>.<application-alias>
+                             jdbc:postgresql://{{ include "dbp.fullname" . }}-proxy.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.proxy.ports.postgres }}/<datasource>.<application-alias>
+
+{{- if not .Values.networkPolicy.enabled }}
+
+NetworkPolicies are disabled (networkPolicy.enabled=false). Enable them and set networkPolicy.databaseCidrs
+so that only the gateway and the proxy can reach the database ports.
+{{- end }}
+{{- if .Values.secrets.create }}
+
+WARNING: the chart created Secret {{ include "dbp.secretName" . }} from values.yaml. Use secrets.existingSecret
+in anything but a sandbox.
+{{- end }}

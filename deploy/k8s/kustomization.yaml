@@ -1,0 +1,27 @@
+# kubectl apply -k deploy/k8s
+#
+# Before applying:  cp secret.example.yaml secret.yaml  and fill in real values (secret.yaml is git-ignored
+# by convention; never commit it). The databases are assumed to be OUTSIDE the cluster (or deployed
+# separately); their addresses live in the control plane configuration, not here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: dbp
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - control-plane.yaml
+  - gateway.yaml
+  - proxy.yaml
+  - hpa.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
+commonLabels:
+  app.kubernetes.io/part-of: dbp
+images:
+  - name: dbp/control-plane
+    newTag: 0.1.0-SNAPSHOT
+  - name: dbp/gateway
+    newTag: 0.1.0-SNAPSHOT
+  - name: dbp/proxy
+    newTag: 0.1.0-SNAPSHOT

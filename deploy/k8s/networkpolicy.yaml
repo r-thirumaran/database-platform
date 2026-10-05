@@ -1,0 +1,129 @@
+# The enforcement story: only the gateway and the proxy may open connections to the database ports.
+# Everything else in the platform namespace keeps normal egress EXCEPT to the database network, and
+# application namespaces get the same deny policy (see the last document) so that "just connecting to
+# the database directly" stops working once a team is onboarded.
+#
+# Replace 10.100.0.0/16 with the CIDR(s) of the database hosts (or use a CiliumNetworkPolicy /
+# FQDN-based policy if your CNI supports it).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-platform-to-databases
+  namespace: dbp
+spec:
+  podSelector:
+    matchExpressions:
+      - key: dbp.io/component
+        operator: In
+        values: ["gateway", "proxy", "control-plane"]   # control plane = collectors
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.100.0.0/16
+      ports:
+        - protocol: TCP
+          port: 1521
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 1433
+    # everything else (control plane, DNS, cluster services)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["10.100.0.0/16"]
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# Everything in the platform namespace that is NOT gateway/proxy/control-plane: normal egress minus the
+# database network. NetworkPolicies are additive, so the platform pods above keep their database access.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-direct-database-access
+  namespace: dbp
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["10.100.0.0/16"]
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# Who may talk to the gateway and the proxy: pods in namespaces labelled dbp.io/consumer=true.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-consumers-to-platform
+  namespace: dbp
+spec:
+  podSelector:
+    matchExpressions:
+      - key: dbp.io/component
+        operator: In
+        values: ["gateway", "proxy"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              dbp.io/consumer: "true"
+        - podSelector: {}        # same namespace (examples, monitoring)
+      ports:
+        - protocol: TCP
+          port: 7420
+        - protocol: TCP
+          port: 1521
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 1433
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              dbp.io/monitoring: "true"
+      ports:
+        - protocol: TCP
+          port: 7421
+        - protocol: TCP
+          port: 7431
+---
+# Example for an APPLICATION namespace (copy per namespace, adjust name/namespace): applications may reach
+# the gateway/proxy but not the database network. Not included in kustomization.yaml (needs the target
+# namespace to exist); shown here because it is the policy that makes "bypassing the platform" impossible.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-direct-database-access
+  namespace: dbp   # <- change to the application namespace
+  annotations:
+    dbp.io/example: "true"
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["10.100.0.0/16"]
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

@@ -1,0 +1,157 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dbp.fullname" . }}-gateway
+  labels:
+    {{- include "dbp.labels" . | nindent 4 }}
+    {{- include "dbp.selectorLabels" (dict "root" . "component" "gateway") | nindent 4 }}
+spec:
+  {{- if not .Values.gateway.autoscaling.enabled }}
+  replicas: {{ .Values.gateway.replicas }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels:
+      {{- include "dbp.selectorLabels" (dict "root" . "component" "gateway") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dbp.selectorLabels" (dict "root" . "component" "gateway") | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.gateway.adminPort | quote }}
+        prometheus.io/path: /metrics
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds }}
+      containers:
+        - name: gateway
+          image: {{ include "dbp.image" (dict "root" . "repository" .Values.gateway.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: wire
+              containerPort: {{ .Values.gateway.port }}
+            - name: admin
+              containerPort: {{ .Values.gateway.adminPort }}
+          env:
+            - name: DBP_GATEWAY_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: DBP_CONTROL_PLANE_URL
+              value: {{ include "dbp.controlPlaneUrl" . | quote }}
+            - name: DBP_GATEWAY_PORT
+              value: {{ .Values.gateway.port | quote }}
+            - name: DBP_GATEWAY_ADMIN_PORT
+              value: {{ .Values.gateway.adminPort | quote }}
+            - name: DBP_TELEMETRY_FLUSH_MS
+              value: {{ .Values.config.telemetryFlushMs | quote }}
+            - name: DBP_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dbp.secretName" . }}
+                  key: DBP_SERVICE_TOKEN
+            - name: JAVA_TOOL_OPTIONS
+              value: {{ .Values.javaToolOptions | quote }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          startupProbe:
+            httpGet: { path: /health, port: admin }
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet: { path: /health, port: admin }
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: wire }
+            periodSeconds: 20
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dbp.fullname" . }}-gateway
+  labels:
+    {{- include "dbp.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.gateway.service.type }}
+  selector:
+    {{- include "dbp.selectorLabels" (dict "root" . "component" "gateway") | nindent 4 }}
+  ports:
+    - name: wire
+      port: {{ .Values.gateway.port }}
+      targetPort: wire
+    - name: admin
+      port: {{ .Values.gateway.adminPort }}
+      targetPort: admin
+{{- if .Values.gateway.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "dbp.fullname" . }}-gateway
+  labels:
+    {{- include "dbp.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "dbp.fullname" . }}-gateway
+  minReplicas: {{ .Values.gateway.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.gateway.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.gateway.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+{{- end }}
+{{- if .Values.gateway.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "dbp.fullname" . }}-gateway
+  labels:
+    {{- include "dbp.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.gateway.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "dbp.selectorLabels" (dict "root" . "component" "gateway") | nindent 6 }}
+{{- end }}
+{{- end }}

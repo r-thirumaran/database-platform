@@ -1,0 +1,11 @@
+.git
+**/target
+**/node_modules
+dbp-ui/dist
+dbp-ui/.vite
+data
+deploy/.generated
+deploy/.env
+*.log
+.idea
+.vscode

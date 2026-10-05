@@ -97,6 +97,7 @@ services:
       SPRING_PROFILES_ACTIVE: postgres
       DBP_DB_URL: jdbc:postgresql://postgres:5432/dbp
       DBP_DB_USER: dbp
+      DBP_DB_USERNAME: dbp          # same value under both spellings used by the docs
       DBP_DB_PASSWORD: ${DBP_DB_PASSWORD:-dbp}
       DBP_SERVICE_TOKEN: ${DBP_SERVICE_TOKEN:-dev-service-token}
       DBP_MASTER_KEY: ${DBP_MASTER_KEY:?Set DBP_MASTER_KEY in deploy/.env}
@@ -201,6 +202,7 @@ services:
   # ===========================================================================================
   # Example applications (profile "examples")
   # ===========================================================================================
+  # the three variants share one image; compose builds an image name only once
   orders-service-direct:
     build:
       <<: *build-context
@@ -223,6 +225,9 @@ services:
     restart: unless-stopped
 
   orders-service-proxy:
+    build:
+      <<: *build-context
+      dockerfile: dbp-examples/orders-service/Dockerfile
     image: ${DBP_IMAGE_PREFIX:-dbp}/orders-service:${DBP_VERSION:-0.1.0-SNAPSHOT}
     container_name: dbp-orders-proxy
     profiles: ["examples"]
@@ -236,8 +241,6 @@ services:
     ports:
       - "${ORDERS_PROXY_HOST_PORT:-8092}:8080"
     depends_on:
-      orders-service-direct:
-        condition: service_started   # same image: make sure it is built once
       proxy:
         condition: service_healthy
       oracle:
@@ -245,6 +248,9 @@ services:
     restart: unless-stopped
 
   orders-service-gateway:
+    build:
+      <<: *build-context
+      dockerfile: dbp-examples/orders-service/Dockerfile
     image: ${DBP_IMAGE_PREFIX:-dbp}/orders-service:${DBP_VERSION:-0.1.0-SNAPSHOT}
     container_name: dbp-orders-gateway
     profiles: ["examples"]
@@ -263,8 +269,6 @@ services:
     volumes:
       - ./.generated:/run/dbp:ro
     depends_on:
-      orders-service-direct:
-        condition: service_started
       gateway:
         condition: service_healthy
       bootstrap:

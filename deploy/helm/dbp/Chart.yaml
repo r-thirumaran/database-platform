@@ -1,0 +1,10 @@
+apiVersion: v2
+name: dbp
+description: Database Access Platform - control plane, gateway and transparent proxy
+type: application
+version: 0.1.0
+appVersion: "0.1.0-SNAPSHOT"
+keywords: [database, proxy, gateway, jdbc, governance]
+home: https://github.com/r-thirumaran/database-platform
+sources:
+  - https://github.com/r-thirumaran/database-platform

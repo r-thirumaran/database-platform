@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dbp-config
+  namespace: dbp
+data:
+  # control plane
+  SPRING_PROFILES_ACTIVE: postgres
+  DBP_DB_URL: jdbc:postgresql://dbp-metadata-db.dbp.svc.cluster.local:5432/dbp
+  DBP_DB_USER: dbp
+  DBP_DB_USERNAME: dbp
+  DBP_SECURITY_MODE: none
+  DBP_DEMO_SEED_ENABLED: "false"
+  DBP_TELEMETRY_RETENTION_HOURS: "72"
+  DBP_GOVERNANCE_INTERVAL_SECONDS: "300"
+  # gateway / proxy
+  DBP_CONTROL_PLANE_URL: http://dbp-control-plane.dbp.svc.cluster.local:8080
+  DBP_TELEMETRY_FLUSH_MS: "2000"
+  DBP_GATEWAY_PORT: "7420"
+  DBP_GATEWAY_ADMIN_PORT: "7421"
+  DBP_PROXY_ADMIN_PORT: "7431"

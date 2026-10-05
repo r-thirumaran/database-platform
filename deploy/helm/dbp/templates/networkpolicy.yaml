@@ -1,0 +1,85 @@
+{{- if .Values.networkPolicy.enabled }}
+# Only gateway, proxy and control plane (collectors) may reach the database network on the database ports.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dbp.fullname" . }}-allow-platform-to-databases
+  labels:
+    {{- include "dbp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: dbp.io/component
+        operator: In
+        values: ["gateway", "proxy", "control-plane"]
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        {{- range .Values.networkPolicy.databaseCidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        {{- range .Values.networkPolicy.databasePorts }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- toYaml .Values.networkPolicy.databaseCidrs | nindent 14 }}
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Everybody else in this namespace: normal egress minus the database network.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dbp.fullname" . }}-deny-direct-database-access
+  labels:
+    {{- include "dbp.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- toYaml .Values.networkPolicy.databaseCidrs | nindent 14 }}
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Consumers (namespaces labelled {{ .Values.networkPolicy.consumerNamespaceLabel }}=true) may reach gateway and proxy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dbp.fullname" . }}-allow-consumers
+  labels:
+    {{- include "dbp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: dbp.io/component
+        operator: In
+        values: ["gateway", "proxy"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{ .Values.networkPolicy.consumerNamespaceLabel }}: "true"
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: {{ .Values.gateway.port }} }
+        - { protocol: TCP, port: {{ .Values.proxy.ports.oracle }} }
+        - { protocol: TCP, port: {{ .Values.proxy.ports.postgres }} }
+        - { protocol: TCP, port: {{ .Values.proxy.ports.mssql }} }
+{{- end }}
