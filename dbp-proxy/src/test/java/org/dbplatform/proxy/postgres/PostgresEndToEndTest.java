@@ -281,7 +281,9 @@ class PostgresEndToEndTest {
         Map<String, Object> close = cp.events("CLOSE").stream()
                 .filter(e -> open.get("connectionId").equals(e.get("connectionId"))).findFirst().orElseThrow();
         assertThat(close).containsKeys("closedAt", "reason", "openedAt");
-        assertThat(close.get("reason")).isEqualTo("client closed");
+        // pgjdbc sends Terminate ('X') and then closes; PostgreSQL closes its side on Terminate, so the two EOFs race
+        // and either pump direction may observe the close first
+        assertThat(close.get("reason")).isIn("client closed", "backend closed");
         assertThat(close.get("proxyLocalPort")).isEqualTo(open.get("proxyLocalPort"));
         assertThat(((Number) close.get("bytesIn")).longValue()).isPositive();
 
