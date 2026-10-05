@@ -1,0 +1,14 @@
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %-32logger{32} %msg%n</pattern>
+        </encoder>
+    </appender>
+    <logger name="org.dbplatform.it" level="INFO"/>
+    <logger name="com.zaxxer.hikari" level="WARN"/>
+    <logger name="org.postgresql" level="WARN"/>
+    <logger name="h2database" level="WARN"/>
+    <root level="WARN">
+        <appender-ref ref="STDOUT"/>
+    </root>
+</configuration>

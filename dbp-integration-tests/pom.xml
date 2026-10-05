@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.dbplatform</groupId>
+        <artifactId>dbp-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>dbp-integration-tests</artifactId>
+    <packaging>jar</packaging>
+    <name>dbp-integration-tests</name>
+    <description>
+        End-to-end validation of the platform: embedded PostgreSQL + control plane + gateway + proxy as real processes,
+        exercised only through the public JDBC driver and the REST API. Run with: mvn -f dbp-integration-tests/pom.xml verify
+    </description>
+
+    <properties>
+        <!-- Executable jars of the components under test. Defaults point at the sibling modules' build output;
+             override on the command line, e.g. -Ddbp.it.controlPlaneJar=/path/dbp-control-plane.jar -->
+        <dbp.it.controlPlaneJar>${project.basedir}/../dbp-control-plane/target/dbp-control-plane.jar</dbp.it.controlPlaneJar>
+        <dbp.it.proxyJar>${project.basedir}/../dbp-proxy/target/dbp-proxy-${project.version}-all.jar</dbp.it.proxyJar>
+        <!-- The gateway shaded jar is copied from the local repository (org.dbplatform:dbp-gateway:all) by the
+             dependency plugin; set this to use another jar instead. -->
+        <dbp.it.gatewayJar>${project.build.directory}/it/jars/dbp-gateway-all.jar</dbp.it.gatewayJar>
+        <dbp.it.controlPlanePort>18080</dbp.it.controlPlanePort>
+        <dbp.it.gatewayPort>17420</dbp.it.gatewayPort>
+        <skipITs>false</skipITs>
+    </properties>
+
+    <dependencies>
+        <!-- the driver under test (plain jar + dbp-protocol) -->
+        <dependency>
+            <groupId>org.dbplatform</groupId>
+            <artifactId>dbp-jdbc</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- direct access to the embedded PostgreSQL (superuser checks, proxy path) -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- second engine: H2 TCP server (MODE=Oracle) behind a static-mode gateway -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- no unit tests in this module: everything is an *IT run by failsafe -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-gateway-jar</id>
+                        <phase>pre-integration-test</phase>
+                        <goals>
+                            <goal>copy</goal>
+                        </goals>
+                        <configuration>
+                            <artifactItems>
+                                <artifactItem>
+                                    <groupId>org.dbplatform</groupId>
+                                    <artifactId>dbp-gateway</artifactId>
+                                    <version>${project.version}</version>
+                                    <classifier>all</classifier>
+                                    <type>jar</type>
+                                    <destFileName>dbp-gateway-all.jar</destFileName>
+                                </artifactItem>
+                            </artifactItems>
+                            <outputDirectory>${project.build.directory}/it/jars</outputDirectory>
+                            <overWriteSnapshots>true</overWriteSnapshots>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <skipITs>${skipITs}</skipITs>
+                    <includes>
+                        <include>**/*IT.java</include>
+                    </includes>
+                    <runOrder>alphabetical</runOrder>
+                    <forkCount>1</forkCount>
+                    <reuseForks>true</reuseForks>
+                    <trimStackTrace>false</trimStackTrace>
+                    <argLine>-Xmx512m -XX:TieredStopAtLevel=1</argLine>
+                    <systemPropertyVariables>
+                        <dbp.it.repoRoot>${project.basedir}/..</dbp.it.repoRoot>
+                        <dbp.it.workDir>${project.build.directory}/it</dbp.it.workDir>
+                        <dbp.it.controlPlaneJar>${dbp.it.controlPlaneJar}</dbp.it.controlPlaneJar>
+                        <dbp.it.proxyJar>${dbp.it.proxyJar}</dbp.it.proxyJar>
+                        <dbp.it.gatewayJar>${dbp.it.gatewayJar}</dbp.it.gatewayJar>
+                        <dbp.it.controlPlanePort>${dbp.it.controlPlanePort}</dbp.it.controlPlanePort>
+                        <dbp.it.gatewayPort>${dbp.it.gatewayPort}</dbp.it.gatewayPort>
+                    </systemPropertyVariables>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

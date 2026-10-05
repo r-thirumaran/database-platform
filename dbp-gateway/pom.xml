@@ -117,6 +117,11 @@
                     <reuseForks>true</reuseForks>
                     <argLine>-Xmx768m -XX:+UseSerialGC -Djdk.virtualThreadScheduler.parallelism=8</argLine>
                     <trimStackTrace>false</trimStackTrace>
+                    <!-- the real driver (dbp-jdbc/target/classes, built by `mvn -pl dbp-jdbc test`) for the
+                         driver <-> gateway round-trip test; the test skips itself when the directory is absent -->
+                    <additionalClasspathElements>
+                        <additionalClasspathElement>${project.basedir}/../dbp-jdbc/target/classes</additionalClasspathElement>
+                    </additionalClasspathElements>
                 </configuration>
             </plugin>
             <plugin>
