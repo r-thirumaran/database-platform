@@ -59,9 +59,11 @@ telemetry.close();                   // on shutdown: flushes what it can, never 
   dropped and counted.
 * One virtual thread posts JSON arrays of at most 500 events, every `DBP_TELEMETRY_FLUSH_MS` (default
   2000) or as soon as 500 events accumulate; `flush()` forces an early send.
-* Header `X-DBP-Service-Token`, `Content-Type: application/json`. A failed POST (connection refused,
-  timeout, 5xx, 408, 429) re-queues the batch at the head and retries after the flush interval; a 4xx
-  rejection drops the batch (retrying would not help). Warnings are rate limited to one per 10 s.
+* Header `X-DBP-Service-Token`, `Content-Type: application/json`. A batch is sent as one POST per event
+  kind. A failed POST (connection refused, timeout, 5xx, 408, 429) re-queues **only the events of that
+  POST** at the head and retries them after the flush interval — events of another kind delivered in the
+  same cycle are never sent twice, and `sentCount()` counts delivered events only; a 4xx rejection drops
+  the events of that POST (retrying would not help). Warnings are rate limited to one per 10 s.
 * `record(...)` never blocks and never throws. The client uses `HttpClient.Builder.NO_PROXY`; pass your
   own `HttpClient` through the builder for TLS or proxy settings.
 

@@ -15,6 +15,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -24,6 +25,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class ListenerRuntime {
     private static final Logger LOG = LoggerFactory.getLogger(ListenerRuntime.class);
+    /** Pause after a transient accept failure (EMFILE, ENOBUFS, …) so the loop does not spin. */
+    static final long ACCEPT_ERROR_BACKOFF_MS = 100;
 
     private final ProxyRuntime rt;
     private volatile ListenerConfig config;
@@ -72,6 +75,7 @@ public final class ListenerRuntime {
         return inFlight.get();
     }
 
+    /** False once stopped, or once the accept loop died on a socket error (a reload / repair re-binds it). */
     public boolean isRunning() {
         return running && !server.isClosed();
     }
@@ -92,12 +96,23 @@ public final class ListenerRuntime {
             try {
                 s = server.accept();
             } catch (SocketException e) {
-                if (running) {
-                    LOG.warn("listener '{}' accept failed: {}", config.name(), e.getMessage());
+                if (running && !server.isClosed()) {
+                    // the server socket itself is broken: give up on it so that the next configuration
+                    // poll / reload recreates this listener instead of leaving a silent dead port
+                    running = false;
+                    LOG.warn("listener '{}' accept loop stopped: {} (will be re-bound on the next configuration poll)",
+                            config.name(), e.getMessage());
                 }
                 break;
             } catch (IOException e) {
+                // transient (too many open files, no buffer space, …): back off instead of hot-spinning
                 LOG.warn("listener '{}' accept failed: {}", config.name(), e.getMessage());
+                try {
+                    Thread.sleep(ACCEPT_ERROR_BACKOFF_MS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
                 continue;
             }
             dispatch(s);
@@ -122,6 +137,16 @@ public final class ListenerRuntime {
             s.setKeepAlive(true);
             ctx = new ConnectionContext(rt, this, s, live, capReason);
             handlerFor(ctx.config()).handle(ctx);
+        } catch (SocketTimeoutException e) {
+            if (live.state() == LiveConnection.State.ESTABLISHED) {
+                LOG.debug("{} ended with I/O error: {}", live.id(), e.toString());
+            } else {
+                // handshake deadline: a client (or backend) that stalled before the connection was established
+                LOG.info("{} from {}:{} dropped during the handshake: {}", live.id(), live.clientAddr(), live.clientPort(), e.getMessage());
+            }
+            if (ctx != null) {
+                ctx.closed("handshake timeout: " + e.getMessage());
+            }
         } catch (IOException e) {
             LOG.debug("{} ended with I/O error: {}", live.id(), e.toString());
             if (ctx != null) {

@@ -5,7 +5,8 @@ import type { Database, Datasource, DatasourceImpact } from '../../api/types';
 import { useDatabases, useDatasourceImpact, useDatasourceMutations } from '../../api/hooks';
 import { Modal } from '../../components/Modal';
 import { Loading, ErrorState } from '../../components/States';
-import { Badge, EngineBadge, KindBadge, SourceBadge } from '../../components/Badge';
+import { Badge, EngineBadge, SourceBadge } from '../../components/Badge';
+import { RelativeTime } from '../../components/RelativeTime';
 import { Field } from '../../components/Field';
 import { RiskRing } from '../impact/RiskRing';
 import { useToast } from '../../components/Toast';
@@ -76,20 +77,14 @@ export function SwitchDialog({ ds, current, onClose }: { ds: Datasource; current
 }
 
 export function ImpactSummary({ impact, divertedApps }: { impact: DatasourceImpact; divertedApps: Set<string | null> }) {
-  const allConsumers = [...impact.directConsumers, ...impact.indirectConsumers];
-  const apps = new Map<string, { name: string; id: string; team: string | null; kinds: Set<string>; diverted: boolean }>();
-  for (const c of allConsumers) {
-    const e = apps.get(c.application.id) ?? { name: c.application.name, id: c.application.id, team: c.team?.name ?? null, kinds: new Set<string>(), diverted: divertedApps.has(c.application.id) };
-    e.kinds.add(c.kind);
-    apps.set(c.application.id, e);
-  }
+  const apps = impact.applications.map((a) => ({ ...a, diverted: a.hasRoutingRule || divertedApps.has(a.application.id) }));
   return (
     <div className="stack">
       <div className="risk">
         <RiskRing score={impact.riskScore} />
         <div>
           <div className="kpi-row" style={{ gridTemplateColumns: 'repeat(4, minmax(110px, 1fr))', gap: 8 }}>
-            <Mini label="Applications" value={apps.size} />
+            <Mini label="Applications" value={apps.length} />
             <Mini label="Teams" value={impact.teamsAffected.length} />
             <Mini label="Tables" value={impact.tables.length} />
             <Mini label="Triggers / routines" value={`${impact.triggers.length} / ${impact.routines.length}`} />
@@ -100,10 +95,11 @@ export function ImpactSummary({ impact, divertedApps }: { impact: DatasourceImpa
       <div className="grid cols-2">
         <div>
           <h3 style={{ marginBottom: 6 }}>Applications affected</h3>
-          <DataTable compact rows={[...apps.values()]} rowKey={(a) => a.id} columns={[
-            { key: 'app', header: 'Application', render: (a) => <Link to={links.application(a.id)}>{a.name}</Link> },
-            { key: 'team', header: 'Team', render: (a) => a.team ?? <span className="muted">—</span> },
-            { key: 'kinds', header: 'Access', render: (a) => <span className="badge-row">{[...a.kinds].map((k) => <KindBadge key={k} kind={k} />)}</span> },
+          <DataTable compact rows={apps} rowKey={(a) => a.application.id} initialSort={{ key: 'q', dir: 'desc' }} columns={[
+            { key: 'app', header: 'Application', render: (a) => <Link to={links.application(a.application.id)}>{a.application.name}</Link> },
+            { key: 'team', header: 'Team', render: (a) => (a.team ? <Link to={links.team(a.team.id)}>{a.team.name}</Link> : <span className="muted">—</span>) },
+            { key: 'q', header: 'Queries', align: 'right', sort: (a) => a.queryCount, render: (a) => compact(a.queryCount) },
+            { key: 'last', header: 'Last seen', render: (a) => <RelativeTime value={a.lastSeenAt} staleDays={30} /> },
             { key: 'rule', header: '', render: (a) => (a.diverted ? <Badge tone="blue" title="Has an enabled routing rule; unaffected by the default route">routing rule</Badge> : null) },
           ]} />
         </div>

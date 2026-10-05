@@ -82,7 +82,7 @@ function DatasourceView({ s }: { s: DatasourceSummary }) {
         </Card>
 
         <Card title="Pool policy" hint="applies to every gateway">
-          <PoolPolicyEditor policy={ds.poolPolicy} busy={update.isPending} onSave={(p) => update.mutate({ id: ds.id, body: { poolPolicy: p } }, { onSuccess: () => toast.success('Pool policy saved'), onError: (e) => toast.error(errorMessage(e)) })} />
+          <PoolPolicyEditor policy={ds.poolPolicy} busy={update.isPending} onSave={(p) => update.mutate({ id: ds.id, body: { ...ds, poolPolicy: p } }, { onSuccess: () => toast.success('Pool policy saved'), onError: (e) => toast.error(errorMessage(e)) })} />
         </Card>
 
         <Card title="Gateway pools" hint="live">
@@ -249,7 +249,7 @@ function GrantsCard({ ds, grants, appName, className }: { ds: Datasource; grants
           { key: 'proxy', header: 'Max proxy', align: 'right', render: (g) => g.maxProxyConnections },
           { key: 'mode', header: 'Pool mode', render: (g) => g.poolModeOverride ?? <span className="muted">inherit</span> },
           { key: 'ro', header: 'Read only', render: (g) => (g.readOnly ? <Badge tone="amber">read-only</Badge> : <span className="muted">no</span>) },
-          { key: 'enabled', header: 'Enabled', render: (g) => <Toggle checked={g.enabled} onChange={(v) => update.mutate({ id: g.id, body: { enabled: v } }, { onError: (e) => toast.error(errorMessage(e)) })} label={<span className="sr-only">enabled</span>} /> },
+          { key: 'enabled', header: 'Enabled', render: (g) => <Toggle checked={g.enabled} onChange={(v) => update.mutate({ id: g.id, body: { ...g, enabled: v } }, { onError: (e) => toast.error(errorMessage(e)) })} label={<span className="sr-only">enabled</span>} /> },
           { key: 'note', header: 'Note', className: 'truncate', render: (g) => <span className="muted small">{g.note}</span> },
           { key: 'actions', header: '', render: (g) => <div className="row-actions"><button className="btn sm ghost icon" aria-label="Edit grant" onClick={() => setEditing(g)}><Pencil /></button><button className="btn sm ghost icon" aria-label="Delete grant" onClick={() => setConfirmDel(g)}><Trash2 /></button></div> },
         ]} />

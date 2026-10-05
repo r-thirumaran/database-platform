@@ -18,6 +18,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -26,13 +27,16 @@ import java.util.concurrent.Executors;
 import java.util.function.Supplier;
 
 /**
- * Admin endpoints on {@code DBP_PROXY_ADMIN_PORT} (7431): {@code GET /health}, {@code GET /metrics}
- * (Prometheus), {@code GET /connections} (live connections) and {@code GET /config} (effective
- * configuration, no secrets).
+ * Admin endpoints on {@code DBP_PROXY_ADMIN_ADDRESS:DBP_PROXY_ADMIN_PORT} (0.0.0.0:7431): {@code GET /health},
+ * {@code GET /metrics} (Prometheus), {@code GET /connections} (live connections) and {@code GET /config}
+ * (effective configuration, no secrets). {@code /health} and {@code /metrics} are always open (health checks,
+ * Prometheus scrape); {@code /connections} and {@code /config} require {@code X-DBP-Service-Token} when
+ * {@code DBP_SERVICE_TOKEN} is set, because they expose client addresses, users, programs and the route table.
  */
 public final class AdminServer implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(AdminServer.class);
     private static final ObjectMapper JSON = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
+    public static final String TOKEN_HEADER = "X-DBP-Service-Token";
 
     private final HttpServer server;
     private final ProxyServer proxy;
@@ -48,12 +52,20 @@ public final class AdminServer implements AutoCloseable {
         this.registry = registry;
         this.metrics = metrics;
         this.status = status == null ? Map::of : status;
-        this.server = HttpServer.create(new InetSocketAddress(settings.listenAddress(), settings.adminPort()), 64);
+        this.server = HttpServer.create(new InetSocketAddress(settings.adminAddress(), settings.adminPort()), 64);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.createContext("/health", ex -> json(ex, health()));
         server.createContext("/metrics", ex -> text(ex, metrics.scrape(), "text/plain; version=0.0.4; charset=utf-8"));
-        server.createContext("/connections", ex -> json(ex, connections()));
-        server.createContext("/config", ex -> json(ex, config()));
+        server.createContext("/connections", ex -> {
+            if (authorized(ex)) {
+                json(ex, connections());
+            }
+        });
+        server.createContext("/config", ex -> {
+            if (authorized(ex)) {
+                json(ex, config());
+            }
+        });
         server.createContext("/", ex -> {
             if ("/".equals(ex.getRequestURI().getPath())) {
                 json(ex, Map.of("endpoints", List.of("/health", "/metrics", "/connections", "/config")));
@@ -65,21 +77,33 @@ public final class AdminServer implements AutoCloseable {
 
     public void start() {
         server.start();
-        LOG.info("admin API listening on {}", server.getAddress());
+        LOG.info("admin API listening on {} ({} and {} {})", server.getAddress(), "/connections", "/config",
+                settings.adminTokenRequired() ? "require " + TOKEN_HEADER : "are open: set DBP_SERVICE_TOKEN to protect them");
     }
 
     public int port() {
         return server.getAddress().getPort();
     }
 
+    /** Constant-time token check for the sensitive endpoints; answers 401 and returns false when it fails. */
+    private boolean authorized(HttpExchange ex) throws IOException {
+        String required = settings.adminToken();
+        if (required == null) {
+            return true;
+        }
+        String given = ex.getRequestHeaders().getFirst(TOKEN_HEADER);
+        if (given != null && MessageDigest.isEqual(given.getBytes(StandardCharsets.UTF_8), required.getBytes(StandardCharsets.UTF_8))) {
+            return true;
+        }
+        text(ex, "{\"status\":401,\"error\":\"UNAUTHORIZED\",\"message\":\"" + TOKEN_HEADER + " required\"}",
+                "application/json; charset=utf-8", 401);
+        return false;
+    }
+
     Map<String, Object> health() {
         Map<String, Object> m = new LinkedHashMap<>();
         Map<String, String> errors = proxy.listenerErrors();
-        m.put("status", errors.isEmpty() ? "UP" : "DEGRADED");
-        m.put("proxyId", settings.proxyId());
-        m.put("mode", settings.controlPlaneMode() ? "control-plane" : "static");
-        m.put("configVersion", proxy.current().configVersion());
-        m.put("liveConnections", registry.size());
+        boolean allRunning = true;
         List<Map<String, Object>> ls = new ArrayList<>();
         for (ListenerRuntime l : proxy.listeners().values()) {
             Map<String, Object> lm = new LinkedHashMap<>();
@@ -90,7 +114,13 @@ public final class AdminServer implements AutoCloseable {
             lm.put("inFlight", l.inFlight());
             lm.put("live", registry.countForListener(l.config().name()));
             ls.add(lm);
+            allRunning &= l.isRunning();
         }
+        m.put("status", errors.isEmpty() && allRunning ? "UP" : "DEGRADED");
+        m.put("proxyId", settings.proxyId());
+        m.put("mode", settings.controlPlaneMode() ? "control-plane" : "static");
+        m.put("configVersion", proxy.current().configVersion());
+        m.put("liveConnections", registry.size());
         m.put("listeners", ls);
         if (!errors.isEmpty()) {
             m.put("listenerErrors", errors);
@@ -112,7 +142,9 @@ public final class AdminServer implements AutoCloseable {
         Map<String, Object> s = new LinkedHashMap<>();
         s.put("proxyId", settings.proxyId());
         s.put("listenAddress", settings.listenAddress());
+        s.put("adminAddress", settings.adminAddress());
         s.put("adminPort", settings.adminPort());
+        s.put("adminTokenRequired", settings.adminTokenRequired());
         s.put("idleTimeoutSeconds", settings.idleTimeoutSeconds());
         s.put("connectTimeoutMs", settings.connectTimeoutMs());
         s.put("handshakeTimeoutMs", settings.handshakeTimeoutMs());
@@ -121,6 +153,8 @@ public final class AdminServer implements AutoCloseable {
         s.put("configPollSeconds", settings.configPollSeconds());
         s.put("heartbeatSeconds", settings.heartbeatSeconds());
         s.put("staticConfigPath", settings.staticConfigPath());
+        s.put("strictAliases", settings.strictAliases());
+        s.put("unknownAppMaxConnections", settings.unknownAppMaxConnections());
         m.put("settings", s);
         ProxyConfigDocument cfg = proxy.current();
         m.put("configVersion", cfg.configVersion());

@@ -27,6 +27,8 @@ class TelemetryClientTest {
     private HttpServer server;
     private final List<Received> received = new CopyOnWriteArrayList<>();
     private final ConcurrentHashMap<String, AtomicInteger> statusByPath = new ConcurrentHashMap<>();
+    /** Per-path HTTP status override (e.g. fail only the connections endpoint); falls back to {@link #responseStatus}. */
+    private final ConcurrentHashMap<String, Integer> statusForPath = new ConcurrentHashMap<>();
     private volatile int responseStatus = 202;
     private String baseUrl;
 
@@ -41,7 +43,8 @@ class TelemetryClientTest {
                     exchange.getRequestHeaders().getFirst("Content-Type"), node));
             statusByPath.computeIfAbsent(exchange.getRequestURI().getPath(), k -> new AtomicInteger()).incrementAndGet();
             byte[] resp = "{\"accepted\":1}".getBytes();
-            exchange.sendResponseHeaders(responseStatus, resp.length);
+            int status = statusForPath.getOrDefault(exchange.getRequestURI().getPath(), responseStatus);
+            exchange.sendResponseHeaders(status, resp.length);
             try (OutputStream os = exchange.getResponseBody()) {
                 os.write(resp);
             }
@@ -140,22 +143,52 @@ class TelemetryClientTest {
         try (ServerSocket s = new ServerSocket(0)) {
             deadPort = s.getLocalPort();
         }
+        // autoStart(false): no flusher races with the producer, so the counts below are exact
         TelemetryClient client = TelemetryClient.builder("http://127.0.0.1:" + deadPort, "t")
                 .queueCapacity(100).flushInterval(Duration.ofMillis(50)).connectTimeout(Duration.ofMillis(500))
-                .requestTimeout(Duration.ofMillis(500)).build();
+                .requestTimeout(Duration.ofMillis(500)).autoStart(false).build();
         for (int i = 0; i < 250; i++) {
             client.record(QueryEvent.builder().eventId("q" + i).build()); // never throws
         }
-        assertThat(client.queuedCount()).isLessThanOrEqualTo(100);
-        assertThat(client.droppedCount()).isGreaterThanOrEqualTo(150);
-        await().atMost(Duration.ofSeconds(5)).until(() -> client.failedBatchCount() >= 1);
-        // the failed batch is kept (re-queued) for a retry while the queue is not full
-        assertThat(client.queuedCount()).isLessThanOrEqualTo(100);
-        long droppedBeforeClose = client.droppedCount();
-        client.close(); // final delivery fails: remaining events are dropped and counted
-        assertThat(client.droppedCount()).isEqualTo(droppedBeforeClose + 100);
+        assertThat(client.queuedCount()).isEqualTo(100);
+        assertThat(client.droppedCount()).as("the oldest 150 were dropped").isEqualTo(150);
+        client.close(); // final delivery fails: remaining events are dropped and counted, nothing is ever sent
+        assertThat(client.failedBatchCount()).isEqualTo(1);
+        assertThat(client.droppedCount()).isEqualTo(250);
         assertThat(client.sentCount()).isZero();
         assertThat(client.queuedCount()).isZero();
+    }
+
+    @Test
+    void requeuesOnlyTheEventsOfTheFailedPost() {
+        String queries = "/api/v1/internal/telemetry/queries";
+        String connections = "/api/v1/internal/telemetry/connections";
+        statusForPath.put(connections, 503);
+        try (TelemetryClient client = TelemetryClient.builder(baseUrl, "t").flushInterval(Duration.ofMillis(50)).build()) {
+            client.record(QueryEvent.builder().eventId("q1").build());
+            client.record(ConnectionEvent.builder().eventId("c1").proxyId("p-1").eventType(ConnectionEventType.OPEN)
+                    .connectionId("conn-1").engine(Engine.POSTGRES).build());
+            client.record(QueryEvent.builder().eventId("q2").build());
+            // the connections POST keeps failing and is retried; the queries POST succeeded once and is never repeated
+            await().atMost(Duration.ofSeconds(5)).until(() -> client.failedBatchCount() >= 3);
+            assertThat(client.sentCount()).as("only the delivered events count as sent").isEqualTo(2);
+            assertThat(client.droppedCount()).isZero();
+            assertThat(client.queuedCount()).as("the failed connection event is waiting, nothing else").isLessThanOrEqualTo(1);
+            assertThat(received.stream().filter(r -> r.path().equals(queries)).count()).isEqualTo(1);
+            assertThat(received.stream().filter(r -> r.path().equals(connections)).count()).isGreaterThanOrEqualTo(3);
+            assertThat(received.stream().filter(r -> r.path().equals(connections)))
+                    .allSatisfy(r -> assertThat(r.body()).hasSize(1));
+
+            statusForPath.remove(connections);
+            await().atMost(Duration.ofSeconds(5)).until(() -> client.sentCount() == 3);
+        }
+        assertThat(received.stream().filter(r -> r.path().equals(queries)).count()).as("queries were never re-sent").isEqualTo(1);
+        Received q = byPath(queries);
+        assertThat(q.body()).hasSize(2);
+        assertThat(q.body().get(0).get("eventId").asText()).isEqualTo("q1");
+        assertThat(q.body().get(1).get("eventId").asText()).isEqualTo("q2");
+        Received lastConn = received.stream().filter(r -> r.path().equals(connections)).reduce((a, b) -> b).orElseThrow();
+        assertThat(lastConn.body().get(0).get("eventId").asText()).isEqualTo("c1");
     }
 
     @Test

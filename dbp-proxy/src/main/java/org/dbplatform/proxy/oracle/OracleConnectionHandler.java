@@ -23,19 +23,29 @@ import java.io.InputStream;
  *       CONNECT; REDIRECT → the proxy itself reconnects to the redirect address (the client never sees
  *       it, so ephemeral redirect ports stay reachable); REFUSE → forward and close.</li>
  * </ol>
- * Refusals use ORA-12514 (unknown service), ORA-12516 (quota / cap) and ORA-12541 (backend unreachable).
+ * Refusals use ORA-12514 (unknown service, undeclared alias in strict mode), ORA-12516 (quota / cap) and
+ * ORA-12541 (backend unreachable, backend closed or sent a malformed packet during the handshake). Every
+ * read of the handshake is bounded by the connection's handshake deadline.
  */
 public final class OracleConnectionHandler implements ConnectionHandler {
     private static final Logger LOG = LoggerFactory.getLogger(OracleConnectionHandler.class);
     private static final int MAX_HANDSHAKE_ROUNDS = 8;
 
+    /** Invoked before every packet read so the caller can (re-)arm a deadline; {@link #NO_GUARD} for plain streams. */
+    @FunctionalInterface
+    interface ReadGuard {
+        void beforeRead() throws IOException;
+    }
+
+    static final ReadGuard NO_GUARD = () -> {
+    };
+
     @Override
     public void handle(ConnectionContext ctx) throws IOException {
         LiveConnection live = ctx.live();
         ListenerConfig cfg = ctx.config();
-        ctx.setHandshakeTimeout();
 
-        TnsConnectPacket connect = readConnectRequest(ctx.clientIn());
+        TnsConnectPacket connect = readConnectRequest(ctx.clientIn(), ctx::armClientHandshakeTimeout);
         if (connect == null) {
             ctx.closed("client closed before CONNECT");
             return;
@@ -46,7 +56,7 @@ public final class OracleConnectionHandler implements ConnectionHandler {
         live.setClientHost(TnsConnectString.display(cs.host()));
         live.setOsUser(TnsConnectString.display(cs.user()));
         LOG.debug("{} CONNECT v{} service={} program={} host={} user={} deferred={}", live.id(), connect.version(),
-                cs.requestedService(), cs.program(), cs.host(), cs.user(), connect.usesDeferredForm());
+                live.requestedService(), live.program(), live.clientHost(), live.osUser(), connect.usesDeferredForm());
 
         if (ctx.capReason() != null) {
             refuse(ctx, TnsRefusePacket.ERR_NO_HANDLER, ctx.capReason(), "listener_cap");
@@ -55,7 +65,7 @@ public final class OracleConnectionHandler implements ConnectionHandler {
         RouteDecision decision = Router.route(cfg, cs.requestedService());
         if (decision == null) {
             refuse(ctx, TnsRefusePacket.ERR_UNKNOWN_SERVICE,
-                    "unknown service '" + cs.requestedService() + "' on listener '" + cfg.name() + "'", "unknown_service");
+                    "unknown service '" + live.requestedService() + "' on listener '" + cfg.name() + "'", "unknown_service");
             return;
         }
         live.setIdentity(ctx.identity().resolve(new IdentityInput(decision.alias(), cs.program(), null, cs.host(),
@@ -63,6 +73,12 @@ public final class OracleConnectionHandler implements ConnectionHandler {
         live.setDatasource(decision.datasourceId(), decision.datasource(), decision.route().databaseId());
         String resolved = decision.resolvedService() != null ? decision.resolvedService() : cs.requestedService();
         live.setResolvedService(resolved);
+
+        if (ctx.settings().strictAliases() && decision.alias() != null && live.applicationId() == null) {
+            refuse(ctx, TnsRefusePacket.ERR_UNKNOWN_SERVICE, "undeclared application alias '" + live.application()
+                    + "' in service '" + live.requestedService() + "' (DBP_PROXY_STRICT_ALIASES=true)", "undeclared_alias");
+            return;
+        }
 
         String quota = ctx.admit();
         if (quota != null) {
@@ -74,7 +90,7 @@ public final class OracleConnectionHandler implements ConnectionHandler {
         int port = decision.route().port();
         String rewritten = cs.rewrite(decision.resolvedService(), host, port);
         if (!rewritten.equals(connect.connectData())) {
-            LOG.debug("{} rewritten connect string: {}", live.id(), rewritten);
+            LOG.debug("{} rewritten connect string: {}", live.id(), LiveConnection.sanitize(rewritten));
         }
 
         if (!connectBackend(ctx, host, port)) {
@@ -84,7 +100,13 @@ public final class OracleConnectionHandler implements ConnectionHandler {
 
         TnsConnectPacket lastClientConnect = connect;
         for (int round = 0; round < MAX_HANDSHAKE_ROUNDS; round++) {
-            TnsPacket reply = TnsPacket.read(ctx.backendIn());
+            TnsPacket reply;
+            try {
+                reply = readBackend(ctx);
+            } catch (TnsParseException e) {
+                backendProtocolError(ctx, e);
+                return;
+            }
             if (reply == null) {
                 ctx.writeClient(TnsRefusePacket.build(TnsRefusePacket.ERR_NO_LISTENER));
                 ctx.backendFailed("backend " + live.backend() + " closed the connection during the handshake");
@@ -100,7 +122,7 @@ public final class OracleConnectionHandler implements ConnectionHandler {
                 case TnsPacket.TYPE_RESEND -> {
                     LOG.debug("{} backend asked for RESEND", live.id());
                     ctx.writeClient(reply.bytes());
-                    TnsConnectPacket again = readConnectRequest(ctx.clientIn());
+                    TnsConnectPacket again = readConnectRequest(ctx.clientIn(), ctx::armClientHandshakeTimeout);
                     if (again == null) {
                         ctx.closed("client closed during RESEND");
                         return;
@@ -110,24 +132,34 @@ public final class OracleConnectionHandler implements ConnectionHandler {
                     send(ctx, again.withConnectData(data));
                 }
                 case TnsPacket.TYPE_REDIRECT -> {
-                    TnsRedirectPacket redirect = TnsRedirectPacket.parse(reply);
-                    if (redirect.needsData()) {
-                        TnsPacket data = TnsPacket.read(ctx.backendIn());
-                        if (data == null) {
-                            ctx.writeClient(TnsRefusePacket.build(TnsRefusePacket.ERR_NO_LISTENER));
-                            ctx.backendFailed("backend closed while sending REDIRECT data");
-                            return;
+                    String rHost;
+                    int rPort;
+                    String replacement;
+                    try {
+                        TnsRedirectPacket redirect = TnsRedirectPacket.parse(reply);
+                        if (redirect.needsData()) {
+                            TnsPacket data = readBackend(ctx);
+                            if (data == null) {
+                                ctx.writeClient(TnsRefusePacket.build(TnsRefusePacket.ERR_NO_LISTENER));
+                                ctx.backendFailed("backend closed while sending REDIRECT data");
+                                return;
+                            }
+                            redirect = redirect.withData(data);
                         }
-                        redirect = redirect.withData(data);
+                        rHost = redirect.host();
+                        rPort = redirect.port();
+                        replacement = redirect.connectData();
+                    } catch (TnsParseException e) {
+                        // the backend, not the client, sent garbage: never report it as a client protocol error
+                        backendProtocolError(ctx, e);
+                        return;
                     }
-                    String rHost = redirect.host();
-                    int rPort = redirect.port();
                     LOG.debug("{} following REDIRECT to {}:{} (replacement connect data: {})", live.id(), rHost, rPort,
-                            redirect.connectData() != null);
+                            replacement != null);
                     if (!connectBackend(ctx, rHost, rPort)) {
                         return;
                     }
-                    String data = redirect.connectData() != null ? redirect.connectData()
+                    String data = replacement != null ? replacement
                             : TnsConnectString.parse(lastClientConnect.connectData()).rewrite(decision.resolvedService(), host, port);
                     send(ctx, lastClientConnect.withConnectData(data));
                 }
@@ -154,6 +186,12 @@ public final class OracleConnectionHandler implements ConnectionHandler {
 
     /** Read a CONNECT and, when its connect string is deferred, the DATA packet that follows. */
     static TnsConnectPacket readConnectRequest(InputStream in) throws IOException {
+        return readConnectRequest(in, NO_GUARD);
+    }
+
+    /** As {@link #readConnectRequest(InputStream)}, calling {@code guard} before each packet read (handshake deadline). */
+    static TnsConnectPacket readConnectRequest(InputStream in, ReadGuard guard) throws IOException {
+        guard.beforeRead();
         TnsPacket p = TnsPacket.read(in);
         if (p == null) {
             return null;
@@ -163,6 +201,7 @@ public final class OracleConnectionHandler implements ConnectionHandler {
         }
         TnsConnectPacket c = TnsConnectPacket.parse(p);
         if (c.isDeferred()) {
+            guard.beforeRead();
             TnsPacket data = TnsPacket.read(in);
             if (data == null) {
                 return null;
@@ -170,6 +209,18 @@ public final class OracleConnectionHandler implements ConnectionHandler {
             c = c.withDeferredData(data);
         }
         return c;
+    }
+
+    /** One packet from the backend, bounded by the handshake deadline. May throw {@link TnsParseException}. */
+    private static TnsPacket readBackend(ConnectionContext ctx) throws IOException {
+        ctx.armBackendHandshakeTimeout();
+        return TnsPacket.read(ctx.backendIn());
+    }
+
+    /** Malformed packet from the backend: the client gets ORA-12541 and a BACKEND_FAILED event is emitted. */
+    private static void backendProtocolError(ConnectionContext ctx, TnsParseException e) throws IOException {
+        ctx.writeClient(TnsRefusePacket.build(TnsRefusePacket.ERR_NO_LISTENER));
+        ctx.backendFailed("backend " + ctx.live().backend() + " sent a malformed packet during the handshake: " + e.getMessage());
     }
 
     private static boolean connectBackend(ConnectionContext ctx, String host, int port) throws IOException {

@@ -11,8 +11,32 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDemoStore, type DemoStore } from './data';
 import type {
-  AccessGrant, ApiKey, Application, Column, Credential, Database, Datasource, Dependency, EdgeKind, Graph, GraphEdge, GraphNode,
-  GraphNodeType, Impact, ImpactConsumer, Relationship, Routine, RoutineRef, RoutingRule, Table, TableRef, Team, QueryStat,
+  AccessGrant,
+  ApiKey,
+  Application,
+  Column,
+  Consumer,
+  Credential,
+  Database,
+  Datasource,
+  DatasourceImpact,
+  DatasourceImpactApplication,
+  Dependency,
+  EdgeKind,
+  Graph,
+  GraphEdge,
+  GraphNode,
+  GraphNodeType,
+  Impact,
+  ImpactConsumer,
+  QueryStat,
+  Relationship,
+  Routine,
+  RoutineRef,
+  RoutingRule,
+  Table,
+  TableRef,
+  Team,
 } from '../src/api/types';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -102,9 +126,9 @@ function tableSummary(t: Table) {
     ownerTeam: team(t.ownerTeamId),
     producer: app(t.producerApplicationId),
     consumers: rels.map(consumerOf),
-    routines: routines.filter((r) => r.kind !== 'TRIGGER' && r.kind !== 'VIEW').map(routineRef),
+    routines: routines.filter((r) => r.kind !== 'TRIGGER').map(routineRef),
     triggers: deps.filter((d) => d.fromType === 'TABLE' && d.fromId === t.id && d.kind === 'TRIGGERS').map((d) => rtn(d.toId)).filter((r): r is Routine => !!r).map(routineRef),
-    views: routines.filter((r) => r.kind === 'VIEW').map(routineRef),
+    views: deps.filter((d) => d.fromType === 'TABLE' && d.toId === t.id && d.kind === 'REFERENCES').map((d) => tbl(d.fromId)).filter((x): x is Table => !!x && x.kind === 'VIEW').map(tableRef),
     foreignKeysOut: deps.filter((d) => d.fromType === 'TABLE' && d.fromId === t.id && d.kind === 'FOREIGN_KEY').map((d) => tbl(d.toId)).filter((x): x is Table => !!x).map(tableRef),
     foreignKeysIn: deps.filter((d) => d.toType === 'TABLE' && d.toId === t.id && d.kind === 'FOREIGN_KEY').map((d) => tbl(d.fromId)).filter((x): x is Table => !!x).map(tableRef),
     queryStats: queryStatsSummary(stats),
@@ -117,7 +141,7 @@ function impactForTable(t: Table): Impact {
   const direct = s.consumers.filter((c) => !c.viaRoutine);
   const indirect = s.consumers.filter((c) => !!c.viaRoutine);
   // applications calling routines that reference the table (even without an expanded relationship row)
-  for (const r of [...s.routines, ...s.triggers, ...s.views]) {
+  for (const r of [...s.routines, ...s.triggers]) {
     for (const rel of store.relationships.filter((x) => x.objectType === 'ROUTINE' && x.objectId === r.id)) {
       if (!indirect.some((c) => c.application.id === rel.applicationId && c.viaRoutine?.id === r.id)) {
         indirect.push({ ...consumerOf(rel), viaRoutine: r, kind: rel.kind === 'CALLS' ? 'WRITES' : rel.kind });
@@ -147,7 +171,7 @@ function impactForTable(t: Table): Impact {
   };
 }
 
-function impactForDatasource(ds: Datasource) {
+function impactForDatasource(ds: Datasource): DatasourceImpact {
   const dbId = ds.currentDatabaseId;
   const grantedApps = new Set(store.accessGrants.filter((g) => g.datasourceId === ds.id && g.enabled).map((g) => g.applicationId));
   const tables = store.tables.filter((t) => t.databaseId === dbId && store.relationships.some((r) => r.objectType === 'TABLE' && r.objectId === t.id && grantedApps.has(r.applicationId)));
@@ -156,13 +180,17 @@ function impactForDatasource(ds: Datasource) {
     return { table: tableRef(t), consumers: rels.map(consumerOf), queryCount: rels.reduce((s, r) => s + r.queryCount, 0) };
   });
   const all = perTable.flatMap((p) => p.consumers);
-  const direct = uniqueBy(all.filter((c) => !c.viaRoutine), (c) => `${c.application.id}:${c.kind}`);
-  const indirect = uniqueBy(all.filter((c) => !!c.viaRoutine), (c) => `${c.application.id}:${c.kind}:${c.viaRoutine?.id}`);
+  // contract: one row per application (not per table × kind), with its routing-rule status
+  const byApp = new Map<string, DatasourceImpactApplication>();
+  for (const c of all) {
+    const e = byApp.get(c.application.id);
+    if (e) { e.queryCount += c.queryCount ?? 0; if ((c.lastSeenAt ?? '') > (e.lastSeenAt ?? '')) e.lastSeenAt = c.lastSeenAt ?? null; }
+    else byApp.set(c.application.id, { application: c.application, team: c.team, hasRoutingRule: ds.routingRules.some((r) => r.enabled && r.applicationId === c.application.id), queryCount: c.queryCount ?? 0, lastSeenAt: c.lastSeenAt ?? null });
+  }
+  const applications = [...byApp.values()].sort((a, b) => b.queryCount - a.queryCount);
   const teamsAffected = uniqueBy(all.map((c) => c.team).filter((x): x is Team => !!x), (x) => x.id);
   const routines = uniqueBy(tables.flatMap((t) => tableSummary(t).routines), (r) => r.id);
   const triggers = uniqueBy(tables.flatMap((t) => tableSummary(t).triggers), (r) => r.id);
-  const views = uniqueBy(tables.flatMap((t) => tableSummary(t).views), (r) => r.id);
-  const stats = queryStatsSummary(store.queryStats.filter((q) => q.tables.some((x) => tables.some((t) => t.id === x.id))));
   const factors: string[] = [`${tables.length} tables routed`, `${teamsAffected.length} teams affected`];
   let score = Math.min(0.4, teamsAffected.length * 0.1) + Math.min(0.2, tables.length * 0.03);
   if (triggers.length) { factors.push(`${triggers.length} triggers in the write path`); score += 0.12; }
@@ -171,11 +199,11 @@ function impactForDatasource(ds: Datasource) {
   if (ds.routingRules.some((r) => r.enabled)) { factors.push(`${ds.routingRules.filter((r) => r.enabled).length} routing rule(s) already divert traffic`); }
   return {
     target: { type: 'DATASOURCE' as const, id: ds.id, label: ds.name },
-    owner: team(ds.ownerTeamId), producer: null,
-    directConsumers: direct, indirectConsumers: indirect,
-    routines, triggers, dependentViews: views, foreignKeyDependents: [],
-    teamsAffected, queryStats: stats, riskScore: Math.round(Math.min(1, score) * 100) / 100, riskFactors: factors,
+    datasource: ds, currentDatabase: db(ds.currentDatabaseId), targetDatabase: db(ds.targetDatabaseId),
+    applications, teamsAffected,
     tables: perTable.sort((a, b) => b.queryCount - a.queryCount),
+    routines, triggers,
+    riskScore: Math.round(Math.min(1, score) * 100) / 100, riskFactors: factors,
   };
 }
 
@@ -606,10 +634,13 @@ const depName = (type: Dependency['fromType'], id: string) => (type === 'TABLE' 
 const resolveDep = (d: Dependency): Dependency => { const f = depName(d.fromType, d.fromId); const t = depName(d.toType, d.toId); return { ...d, fromName: f ? `${f.schema}.${f.name}` : d.fromId, toName: t ? `${t.schema}.${t.name}` : d.toId }; };
 on('GET', '/routines/:id/summary', ({ params }) => {
   const r = byId(store.routines, params.id, 'routine');
-  const deps = store.dependencies.filter((d) => d.fromId === r.id || d.toId === r.id).map(resolveDep);
-  const tables = uniqueBy(deps.filter((d) => d.fromId === r.id && d.toType === 'TABLE').map((d) => tbl(d.toId)).filter((x): x is Table => !!x), (x) => x.id);
-  const callers = uniqueBy(store.relationships.filter((x) => x.objectType === 'ROUTINE' && x.objectId === r.id).map((x) => app(x.applicationId)).filter((x): x is Application => !!x), (x) => x.id);
-  return { routine: r, dependencies: deps, callers, tables: tables.map(tableRef) };
+  // contract: dependencies = what the routine references, referencedBy = what points at it, callers = ConsumerEntry[]
+  const deps = store.dependencies.filter((d) => d.fromId === r.id).map(resolveDep);
+  const referencedBy = store.dependencies.filter((d) => d.toId === r.id).map(resolveDep);
+  const tables = uniqueBy(deps.filter((d) => d.toType === 'TABLE').map((d) => tbl(d.toId)).filter((x): x is Table => !!x), (x) => x.id);
+  const callers: Consumer[] = store.relationships.filter((x) => x.objectType === 'ROUTINE' && x.objectId === r.id).map((x) => { const c = consumerOf(x); return { ...c, queryCount: c.queryCount ?? x.queryCount, lastSeenAt: c.lastSeenAt ?? null, viaRoutine: c.viaRoutine ?? null }; });
+  const triggerTable = r.triggerTableId ? tbl(r.triggerTableId) ?? null : null;
+  return { routine: r, dependencies: deps, referencedBy, callers, tables: tables.map(tableRef), triggerTable, ownerTeam: team(r.ownerTeamId), database: db(r.databaseId) };
 });
 
 // dependencies & relationships

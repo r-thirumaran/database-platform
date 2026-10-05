@@ -8,7 +8,8 @@ import java.util.HexFormat;
 /**
  * Produces the canonical form of a statement used for grouping and hashing:
  * <ul>
- *   <li>string literals ({@code '…'}, {@code N'…'}, {@code q'[…]'}, {@code $$…$$}), numbers ({@code 42},
+ *   <li>string literals ({@code '…'}, {@code N'…'}, PostgreSQL {@code E'…'} with backslash escapes,
+ *       {@code q'[…]'}, {@code $$…$$}), numbers ({@code 42},
  *       {@code 1.5e3}, {@code 0x1F}) and bind markers ({@code :1}, {@code :name}, {@code $1}) become {@code ?};</li>
  *   <li>comments are removed, except Oracle hints {@code /*+ … *}{@code /} which are kept;</li>
  *   <li>whitespace is collapsed to single spaces (none after {@code (}, none before {@code ,}, {@code )}, {@code ;});</li>
@@ -99,13 +100,14 @@ public final class SqlNormalizer {
 
             // string literal, with optional N / n / E prefix or Oracle q'…' quoting
             if (c == '\'') {
-                i = skipString(sql, i);
+                i = skipString(sql, i, false);
                 pendingSpace = emitToken(out, pendingSpace, normalize ? "?" : "''");
                 continue;
             }
             if ((c == 'N' || c == 'n' || c == 'E' || c == 'e' || c == 'B' || c == 'b' || c == 'X' || c == 'x')
                     && i + 1 < n && sql.charAt(i + 1) == '\'' && (pendingSpace || !prevIsIdentChar(out))) {
-                i = skipString(sql, i + 1);
+                // only PostgreSQL E'…' strings honour backslash escapes; in every other form '\' is a plain character
+                i = skipString(sql, i + 1, c == 'E' || c == 'e');
                 pendingSpace = emitToken(out, pendingSpace, normalize ? "?" : "''");
                 continue;
             }
@@ -264,12 +266,20 @@ public final class SqlNormalizer {
         return !out.isEmpty() && Identifiers.isIdentifierChar(out.charAt(out.length() - 1));
     }
 
-    /** {@code i} points at the opening quote; returns index after the closing quote ({@code ''} escapes handled). */
-    private static int skipString(String sql, int i) {
+    /**
+     * {@code i} points at the opening quote; returns the index after the closing quote. {@code ''} is always
+     * an escaped quote; {@code \x} (including {@code \'} and {@code \\}) only when {@code backslashEscapes}
+     * is set (PostgreSQL {@code E'…'} strings).
+     */
+    private static int skipString(String sql, int i, boolean backslashEscapes) {
         int n = sql.length();
         int j = i + 1;
         while (j < n) {
             char c = sql.charAt(j);
+            if (backslashEscapes && c == '\\') {
+                j += 2;
+                continue;
+            }
             if (c == '\'') {
                 if (j + 1 < n && sql.charAt(j + 1) == '\'') {
                     j += 2;

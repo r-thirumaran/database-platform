@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -159,16 +160,50 @@ public final class PgStartupMessage {
         return raw.length >= 16 ? i32(raw, 8) : 0;
     }
 
-    /** Copy of this startup message with one parameter replaced/added; length is recomputed. */
+    /**
+     * Copy of this startup message with one parameter replaced (or appended when absent); the length is
+     * recomputed. Every other key and value is copied <em>byte for byte</em>: the proxy never re-encodes
+     * what the client sent, so a user name or option in a non-UTF-8 client encoding (e.g. LATIN1
+     * {@code 0xE9}) reaches the backend unchanged. {@link #params()} remains a UTF-8 decoding for display.
+     */
     public PgStartupMessage withParam(String key, String value) {
         if (params == null) {
             throw new IllegalStateException("Not a StartupMessage");
         }
+        byte[] k = key.getBytes(StandardCharsets.UTF_8);
+        byte[] v = value.getBytes(StandardCharsets.UTF_8);
+        ByteArrayOutputStream out = new ByteArrayOutputStream(raw.length + v.length + k.length + 2);
+        out.write(raw, 0, 8);
+        boolean replaced = false;
+        int pos = 8;
+        while (pos < raw.length && raw[pos] != 0) {
+            int kEnd = indexOfNul(raw, pos);
+            int vEnd = indexOfNul(raw, kEnd + 1);
+            if (!replaced && Arrays.equals(raw, pos, kEnd, k, 0, k.length)) {
+                out.write(raw, pos, kEnd + 1 - pos); // key and its NUL, verbatim
+                out.write(v, 0, v.length);
+                out.write(0);
+                replaced = true;
+            } else {
+                out.write(raw, pos, vEnd + 1 - pos); // key\0value\0 untouched
+            }
+            pos = vEnd + 1;
+        }
+        if (!replaced) {
+            out.write(k, 0, k.length);
+            out.write(0);
+            out.write(v, 0, v.length);
+            out.write(0);
+        }
+        out.write(0);
+        byte[] bytes = out.toByteArray();
+        putI32(bytes, 0, bytes.length);
         LinkedHashMap<String, String> p = new LinkedHashMap<>(params);
         p.put(key, value);
-        return build(code, p);
+        return new PgStartupMessage(code, bytes, p);
     }
 
+    /** Builds a startup message from scratch (UTF-8); used by tests and tools, never for rewriting a client's message. */
     public static PgStartupMessage build(int protocolCode, Map<String, String> params) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.write(new byte[8], 0, 8);

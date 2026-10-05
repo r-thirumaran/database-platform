@@ -79,7 +79,7 @@ function TableView({ s }: { s: TableSummary }) {
           <KV items={[
             ['Routines', s.routines.length ? <span className="inline-list">{s.routines.map((r) => <Link key={r.id} to={links.routine(r.id)} className="badge pink">{r.name}</Link>)}</span> : <span className="muted">none</span>],
             ['Triggers', s.triggers.length ? <span className="inline-list">{s.triggers.map((r) => <Link key={r.id} to={links.routine(r.id)} className="badge red">{r.name}</Link>)}</span> : <span className="muted">none</span>],
-            ['Views', s.views.length ? <span className="inline-list">{s.views.map((r) => <Link key={r.id} to={links.routine(r.id)} className="badge teal">{r.name}</Link>)}</span> : <span className="muted">none</span>],
+            ['Views', s.views.length ? <span className="inline-list">{s.views.map((v) => <Link key={v.id} to={links.table(v.id)} className="badge teal">{v.schema}.{v.name}</Link>)}</span> : <span className="muted">none</span>],
             ['FK → (references)', s.foreignKeysOut.length ? <span className="inline-list">{s.foreignKeysOut.map((x) => <Link key={x.id} to={links.table(x.id)} className="badge outline">{x.schema}.{x.name}</Link>)}</span> : <span className="muted">none</span>],
             ['FK ← (dependents)', s.foreignKeysIn.length ? <span className="inline-list">{s.foreignKeysIn.map((x) => <Link key={x.id} to={links.table(x.id)} className="badge outline">{x.schema}.{x.name}</Link>)}</span> : <span className="muted">none</span>],
           ]} />

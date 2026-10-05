@@ -160,7 +160,7 @@ function IdentityRulesCard({ app, className }: { app: Application; className?: s
   const dirty = JSON.stringify(rules) !== JSON.stringify(app.identityRules);
   return (
     <Card className={className} title="Identity rules" hint="how proxy and collectors attribute connections" actions={dirty && <button className="btn sm ghost" onClick={() => setRules(app.identityRules)}>Reset</button>}>
-      <form onSubmit={(e) => { e.preventDefault(); update.mutate({ id: app.id, body: { identityRules: rules } }, { onSuccess: () => toast.success('Identity rules saved'), onError: (err) => toast.error(errorMessage(err)) }); }}>
+      <form onSubmit={(e) => { e.preventDefault(); update.mutate({ id: app.id, body: { ...app, identityRules: rules } }, { onSuccess: () => toast.success('Identity rules saved'), onError: (err) => toast.error(errorMessage(err)) }); }}>
         <div className="form-grid">
           {RULE_FIELDS.map((f) => (
             <Field key={f.key} label={f.label} help={f.help} full={f.key === 'serviceAliases'}>{(id) => <ChipInput id={id} value={rules[f.key]} onChange={(v) => setRules({ ...rules, [f.key]: v })} placeholder={f.placeholder} />}</Field>

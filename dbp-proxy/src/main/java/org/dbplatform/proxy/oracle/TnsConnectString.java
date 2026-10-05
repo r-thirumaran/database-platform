@@ -2,12 +2,15 @@ package org.dbplatform.proxy.oracle;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Semantic view of an Oracle connect string: the requested service and client identification, plus
  * the rewriting used by the proxy before forwarding the CONNECT to the backend.
  */
 public final class TnsConnectString {
+    private static final Pattern CONTROL_CHARS = Pattern.compile("\\p{Cntrl}");
+
     private final String raw;
     private final TnsDescriptor descriptor;
     private final String serviceName;
@@ -137,11 +140,12 @@ public final class TnsConnectString {
         return wire;
     }
 
+    /** Strips, unquotes and replaces control characters with {@code ?} (these values end up in logs and telemetry). */
     private static String clean(String v) {
         if (v == null) {
             return null;
         }
-        String s = TnsRedirectPacket.unquote(v.strip());
+        String s = CONTROL_CHARS.matcher(TnsRedirectPacket.unquote(v.strip())).replaceAll("?");
         return s.isEmpty() ? null : s;
     }
 

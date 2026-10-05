@@ -2,8 +2,11 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// Dev server on 5173 proxies the control plane (real one or `npm run mock`) on 8080.
-// The production build (dist/) is served by the control plane itself from classpath:/static.
+// Dev server on 5173 proxies the control plane (the real Spring Boot one or `npm run mock`) at
+// DBP_API_URL (default http://localhost:8080). The production build (dist/) is served by the control
+// plane itself from classpath:/static.
+const apiTarget = process.env.DBP_API_URL ?? 'http://localhost:8080';
+
 export default defineConfig({
   plugins: [react()],
   base: '/',
@@ -11,8 +14,8 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      '/api': { target: 'http://localhost:8080', changeOrigin: true },
-      '/actuator': { target: 'http://localhost:8080', changeOrigin: true },
+      '/api': { target: apiTarget, changeOrigin: true },
+      '/actuator': { target: apiTarget, changeOrigin: true },
     },
   },
   build: {

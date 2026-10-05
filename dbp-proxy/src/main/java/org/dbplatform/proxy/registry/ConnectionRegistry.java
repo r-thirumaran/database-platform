@@ -8,13 +8,24 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 
-/** All connections currently admitted by this proxy (handshake completed up to routing, until close). */
+/**
+ * All connections currently admitted by this proxy (handshake completed up to routing, until close).
+ * Connection ids are {@code c-<instance>-<seq>} where {@code instance} is the registry's creation time in
+ * base 36: ids stay unique across proxy restarts, so OPEN/CLOSE pairs of two process lifetimes never
+ * collide in the control plane.
+ */
 public final class ConnectionRegistry {
     private final ConcurrentHashMap<String, LiveConnection> live = new ConcurrentHashMap<>();
     private final AtomicLong sequence = new AtomicLong();
+    private final String instance = Long.toString(System.currentTimeMillis(), 36);
 
     public String nextId() {
-        return "c-" + sequence.incrementAndGet();
+        return "c-" + instance + "-" + sequence.incrementAndGet();
+    }
+
+    /** The per-process id prefix component (start time in base 36). */
+    public String instanceId() {
+        return instance;
     }
 
     public void add(LiveConnection c) {

@@ -176,6 +176,12 @@ export interface CollectorStatus {
   lastRuntimeRun: Iso | null;
   lastError: string | null;
   tablesSeen: number;
+  // additive extras returned by the control plane
+  lastAuditRun?: Iso | null;
+  routinesSeen?: number;
+  sessionsSeen?: number;
+  enabled?: boolean;
+  running?: string[];
 }
 
 // ---------------------------------------------------------------- 4. credentials
@@ -273,6 +279,7 @@ export interface DatasourceSummary {
   consumers: Application[];
   pools: PoolStats[];
   tables: TableRef[];
+  warnings?: string[]; // additive: e.g. pool budget exceeds Database.maxPhysicalConnections
 }
 
 export interface MigrationEvent {
@@ -324,6 +331,7 @@ export interface Table {
   ownerConfirmed: boolean;
   ownerSource: OwnerSource;
   producerApplicationId: Id | null;
+  producerSource?: OwnerSource | null; // additive: how the producer was determined
   rowCountEstimate: number | null;
   lastDdlAt: Iso | null;
   lastSeenAt: Iso | null;
@@ -353,7 +361,8 @@ export interface Column {
   classification: Classification | null;
 }
 
-export type RoutineKind = 'PROCEDURE' | 'FUNCTION' | 'PACKAGE' | 'PACKAGE_BODY' | 'TRIGGER' | 'VIEW';
+// Views are catalogued as Table.kind = VIEW, not as routines.
+export type RoutineKind = 'PROCEDURE' | 'FUNCTION' | 'PACKAGE' | 'PACKAGE_BODY' | 'TRIGGER';
 
 export interface Routine {
   id: Id;
@@ -419,6 +428,8 @@ export interface Consumer {
   source?: RelationshipSource;
   confidence?: number;
   confirmed?: boolean;
+  stale?: boolean; // additive: no activity for DBP_RELATIONSHIP_STALE_DAYS
+  viaView?: TableRef | null; // additive: access through a view
 }
 
 export interface TableSummary {
@@ -431,16 +442,21 @@ export interface TableSummary {
   triggers: RoutineRef[];
   foreignKeysOut: TableRef[];
   foreignKeysIn: TableRef[];
-  views: RoutineRef[];
+  views: TableRef[]; // views are tables (kind VIEW)
   queryStats: QueryStats;
   topQueries: QueryStat[];
 }
 
 export interface RoutineSummary {
   routine: Routine;
-  dependencies: Dependency[];
-  callers: Application[];
+  dependencies: Dependency[]; // outgoing, with fromName/toName
+  referencedBy: Dependency[]; // incoming, with fromName/toName
+  callers: Consumer[]; // ConsumerEntry, like table consumers
   tables: TableRef[];
+  // additive extras
+  triggerTable?: Table | null;
+  ownerTeam?: Team | null;
+  database?: Database | null;
 }
 
 export interface TableQuery {
@@ -467,7 +483,11 @@ export type EdgeKind =
   | 'TRIGGERS'
   | 'HOSTS'
   | 'MIGRATES_TO'
-  | 'BELONGS_TO';
+  | 'BELONGS_TO'
+  // emitted by the control plane in addition to the kinds listed in the contract
+  | 'ROUTES_TO' // datasource → database
+  | 'PRODUCES' // application → table (declared producer)
+  | 'GRANTED'; // application → datasource (access grant)
 
 export interface GraphNode {
   id: string; // "<type>:<refId>"
@@ -517,17 +537,45 @@ export interface Impact {
   indirectConsumers: ImpactConsumer[];
   routines: RoutineRef[];
   triggers: RoutineRef[];
-  dependentViews: RoutineRef[];
+  dependentViews: TableRef[];
   foreignKeyDependents: TableRef[];
   teamsAffected: Team[];
   queryStats: QueryStats;
   riskScore: number;
   riskFactors: string[];
+  // column impact only
+  column?: Column | null;
   queriesReferencingColumn?: QueryStat[];
 }
 
-export interface DatasourceImpact extends Impact {
-  tables: Array<{ table: TableRef; consumers: ImpactConsumer[]; queryCount: number }>;
+/** `GET /impact/datasource/{id}` — what a migration switch touches. */
+export interface DatasourceImpactApplication {
+  application: Application;
+  team: Team | null;
+  hasRoutingRule: boolean;
+  queryCount: number;
+  lastSeenAt: Iso | null;
+}
+export interface DatasourceImpactTable {
+  table: TableRef;
+  consumers: ImpactConsumer[];
+  queryCount: number;
+  owner?: Team | null;
+  riskScore?: number;
+  riskFactors?: string[];
+}
+export interface DatasourceImpact {
+  target: { type: 'DATASOURCE'; id: Id; label: string };
+  datasource: Datasource;
+  currentDatabase: Database | null;
+  targetDatabase: Database | null;
+  applications: DatasourceImpactApplication[];
+  teamsAffected: Team[];
+  tables: DatasourceImpactTable[];
+  routines: RoutineRef[];
+  triggers: RoutineRef[];
+  riskScore: number;
+  riskFactors: string[];
 }
 
 // ---------------------------------------------------------------- 11. observability
@@ -659,7 +707,9 @@ export interface ExportDocument {
   credentials: Credential[];
   datasources: Datasource[];
   accessGrants: AccessGrant[];
-  ownership?: Array<{ databaseName: string; schema: string; table: string; teamName: string; confirmed: boolean }>;
-  relationships?: Relationship[];
-  dependencies?: Dependency[];
+  ownership?: Array<Record<string, unknown>>;
+  producers?: Array<Record<string, unknown>>;
+  tables?: Array<Record<string, unknown>>;
+  relationships?: Array<Record<string, unknown>>;
+  dependencies?: Array<Record<string, unknown>>;
 }

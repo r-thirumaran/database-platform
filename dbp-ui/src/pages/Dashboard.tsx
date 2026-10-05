@@ -6,7 +6,7 @@ import type { ConnectionsGroupBy } from '../api/types';
 import { PageHeader } from '../components/PageHeader';
 import { StatTile } from '../components/StatTile';
 import { Card } from '../components/Card';
-import { QueryBoundary } from '../components/States';
+import { EmptyState, QueryBoundary } from '../components/States';
 import { Meter } from '../components/Meter';
 import { StackedBars } from '../charts/StackedBars';
 import { SERIES_BY_MEASURE } from '../charts/palette';
@@ -58,7 +58,7 @@ export function Dashboard() {
             </div>
           }
         >
-          <QueryBoundary query={connections}>
+          <QueryBoundary query={connections} empty={<EmptyState inline title="No connections observed" hint="Connections are counted from proxy heartbeats and gateway pool stats." />}>
             {(rows) => (
               <StackedBars
                 data={rows.slice(0, 12)}
@@ -76,7 +76,7 @@ export function Dashboard() {
         </Card>
 
         <Card title="Components" hint="from heartbeats" actions={<Link to={links.admin()} className="btn sm ghost">Admin</Link>}>
-          <QueryBoundary query={components}>
+          <QueryBoundary query={components} empty={<EmptyState inline title="No component online" hint="Gateways and proxies appear here once they send heartbeats." />}>
             {(rows) => (
               <div className="stack" style={{ gap: 8 }}>
                 {rows.map((c) => (
@@ -98,7 +98,7 @@ export function Dashboard() {
         </Card>
 
         <Card title="Pool utilisation" hint="gateway pools" actions={<Link to={links.datasources()} className="btn sm ghost">Datasources</Link>}>
-          <QueryBoundary query={pools}>
+          <QueryBoundary query={pools} empty={<EmptyState inline title="No pool stats yet" hint="Gateways report their pools every few seconds." />}>
             {(rows) => (
               <div>
                 {rows.map((p) => (
@@ -117,7 +117,7 @@ export function Dashboard() {
         </Card>
 
         <Card className="span-2" title="Hot tables" hint="last 24h" actions={<Link to={links.tables()} className="btn sm ghost">Catalogue</Link>} tight>
-          <QueryBoundary query={hot}>
+          <QueryBoundary query={hot} empty={<EmptyState inline title="No table activity in the window" />}>
             {(rows) => (
               <DataTable
                 rows={rows}
@@ -137,7 +137,7 @@ export function Dashboard() {
         </Card>
 
         <Card className="span-2" title="Top queries" hint="by count, 24h" actions={<Link to={links.queries()} className="btn sm ghost">All queries</Link>} tight>
-          <QueryBoundary query={top}>
+          <QueryBoundary query={top} empty={<EmptyState inline title="No queries in the window" />}>
             {(rows) => (
               <DataTable
                 rows={rows}

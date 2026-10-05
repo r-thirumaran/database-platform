@@ -15,6 +15,7 @@
     "test:watch": "vitest",
     "mock": "tsx mock/server.ts",
     "e2e": "playwright test",
+    "e2e:real": "PW_USE_REAL_API=1 playwright test",
     "check": "npm run lint && npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {

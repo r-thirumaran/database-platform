@@ -18,15 +18,22 @@ public final class StaticConfigSource implements AutoCloseable {
     private final Path file;
     private final int pollSeconds;
     private final Consumer<ProxyConfigDocument> onConfig;
+    private final Runnable onPoll;
     private volatile boolean running = true;
     private volatile FileTime lastModified;
     private volatile long version;
     private Thread watcher;
 
     public StaticConfigSource(Path file, int pollSeconds, Consumer<ProxyConfigDocument> onConfig) {
+        this(file, pollSeconds, onConfig, null);
+    }
+
+    /** @param onPoll run once per poll (listener re-bind, see {@code ProxyServer::repair}); may be null */
+    public StaticConfigSource(Path file, int pollSeconds, Consumer<ProxyConfigDocument> onConfig, Runnable onPoll) {
         this.file = file;
         this.pollSeconds = pollSeconds;
         this.onConfig = onConfig;
+        this.onPoll = onPoll == null ? () -> { } : onPoll;
     }
 
     public ProxyConfigDocument loadInitial() throws IOException {
@@ -63,6 +70,11 @@ public final class StaticConfigSource implements AutoCloseable {
                 }
             } catch (IOException | RuntimeException e) {
                 LOG.error("cannot reload {}: {} (keeping the current configuration)", file, e.toString());
+            }
+            try {
+                onPoll.run();
+            } catch (RuntimeException e) {
+                LOG.warn("periodic maintenance failed: {}", e.toString());
             }
         }
     }

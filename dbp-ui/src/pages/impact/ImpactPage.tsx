@@ -123,7 +123,7 @@ export function ImpactView({ impact }: { impact: Impact }) {
           <KV items={[
             ['Routines', impact.routines.length ? <span className="inline-list">{impact.routines.map((r) => <Link key={r.id} to={links.routine(r.id)} className="badge pink">{r.name}</Link>)}</span> : <span className="muted">none</span>],
             ['Triggers', impact.triggers.length ? <span className="inline-list">{impact.triggers.map((r) => <Link key={r.id} to={links.routine(r.id)} className="badge red">{r.name}</Link>)}</span> : <span className="muted">none</span>],
-            ['Dependent views', impact.dependentViews.length ? <span className="inline-list">{impact.dependentViews.map((r) => <Link key={r.id} to={links.routine(r.id)} className="badge teal">{r.name}</Link>)}</span> : <span className="muted">none</span>],
+            ['Dependent views', impact.dependentViews.length ? <span className="inline-list">{impact.dependentViews.map((v) => <Link key={v.id} to={links.table(v.id)} className="badge teal">{v.schema}.{v.name}</Link>)}</span> : <span className="muted">none</span>],
             ['FK dependents', impact.foreignKeyDependents.length ? <span className="inline-list">{impact.foreignKeyDependents.map((t) => <Link key={t.id} to={links.table(t.id)} className="badge outline">{t.schema}.{t.name}</Link>)}</span> : <span className="muted">none</span>],
           ]} />
         </Card>
@@ -166,7 +166,8 @@ function buildMiniGraph(impact: Impact): Graph {
     edge(a, targetId, c.kind === 'CALLS' ? 'READS' : c.kind);
     if (c.team) edge(a, add({ id: `team:${c.team.id}`, type: 'TEAM', label: c.team.name, refId: c.team.id, attrs: {} }), 'BELONGS_TO');
   }
-  for (const r of [...impact.routines, ...impact.dependentViews]) edge(add({ id: `routine:${r.id}`, type: 'ROUTINE', label: r.name, refId: r.id, attrs: {} }), targetId, 'REFERENCES');
+  for (const r of impact.routines) edge(add({ id: `routine:${r.id}`, type: 'ROUTINE', label: r.name, refId: r.id, attrs: {} }), targetId, 'REFERENCES');
+  for (const v of impact.dependentViews) edge(add({ id: `table:${v.id}`, type: 'TABLE', label: `${v.schema}.${v.name}`, refId: v.id, attrs: { kind: 'VIEW' } }), targetId, 'REFERENCES');
   for (const r of impact.triggers) edge(targetId, add({ id: `routine:${r.id}`, type: 'ROUTINE', label: r.name, refId: r.id, attrs: {} }), 'TRIGGERS');
   for (const c of impact.indirectConsumers) {
     const a = add({ id: `application:${c.application.id}`, type: 'APPLICATION', label: c.application.name, refId: c.application.id, attrs: {} });

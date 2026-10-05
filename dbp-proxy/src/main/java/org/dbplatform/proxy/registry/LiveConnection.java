@@ -7,14 +7,26 @@ import org.dbplatform.proxy.identity.ResolvedIdentity;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.regex.Pattern;
 
 /**
  * Mutable record of one proxied client connection. Fields are filled in as the handshake progresses
- * and read concurrently by the admin API, the heartbeat snapshot and the quota manager.
+ * and read concurrently by the admin API, the heartbeat snapshot and the quota manager. Client-supplied
+ * strings (requested service, program, host, users, the application name derived from an alias) are
+ * {@linkplain #sanitize(String) sanitised} on the way in so that control characters cannot forge log
+ * lines, break the admin JSON or reach telemetry.
  */
 public final class LiveConnection {
     public enum State { HANDSHAKE, CONNECTING, ESTABLISHED, CLOSING, CLOSED, REFUSED }
+
+    private static final Pattern CONTROL_CHARS = Pattern.compile("\\p{Cntrl}");
+
+    /** Replaces every control character (including CR, LF, TAB, ESC, NUL) with {@code ?}; null-safe. */
+    public static String sanitize(String s) {
+        return s == null ? null : CONTROL_CHARS.matcher(s).replaceAll("?");
+    }
 
     private final String id;
     private final String listener;
@@ -47,6 +59,7 @@ public final class LiveConnection {
     private volatile Instant closedAt;
     private volatile String reason;
     private volatile long lastActivityNanos = System.nanoTime();
+    private final AtomicBoolean terminalEmitted = new AtomicBoolean();
 
     public LiveConnection(String id, String listener, Engine engine, String clientAddr, int clientPort) {
         this.id = id;
@@ -124,7 +137,7 @@ public final class LiveConnection {
     }
 
     public void setRequestedService(String s) {
-        this.requestedService = s;
+        this.requestedService = sanitize(s);
     }
 
     public String resolvedService() {
@@ -132,7 +145,7 @@ public final class LiveConnection {
     }
 
     public void setResolvedService(String s) {
-        this.resolvedService = s;
+        this.resolvedService = sanitize(s);
     }
 
     public String applicationId() {
@@ -153,7 +166,7 @@ public final class LiveConnection {
 
     public void setIdentity(ResolvedIdentity identity) {
         this.applicationId = identity.applicationId();
-        this.application = identity.application();
+        this.application = sanitize(identity.application()); // an undeclared alias is client-supplied text
         this.teamId = identity.teamId();
         this.identitySource = identity.source();
     }
@@ -181,7 +194,7 @@ public final class LiveConnection {
     }
 
     public void setProgram(String program) {
-        this.program = program;
+        this.program = sanitize(program);
     }
 
     public String clientHost() {
@@ -189,7 +202,7 @@ public final class LiveConnection {
     }
 
     public void setClientHost(String clientHost) {
-        this.clientHost = clientHost;
+        this.clientHost = sanitize(clientHost);
     }
 
     public String osUser() {
@@ -197,7 +210,7 @@ public final class LiveConnection {
     }
 
     public void setOsUser(String osUser) {
-        this.osUser = osUser;
+        this.osUser = sanitize(osUser);
     }
 
     public String dbUser() {
@@ -205,7 +218,7 @@ public final class LiveConnection {
     }
 
     public void setDbUser(String dbUser) {
-        this.dbUser = dbUser;
+        this.dbUser = sanitize(dbUser);
     }
 
     public Instant closedAt() {
@@ -220,6 +233,14 @@ public final class LiveConnection {
 
     public String reason() {
         return reason;
+    }
+
+    /**
+     * Claims the right to emit this connection's terminal event (CLOSE / REFUSED / BACKEND_FAILED):
+     * true exactly once, so the handler and a proxy shutdown cannot both report the end of a connection.
+     */
+    public boolean markTerminalEmitted() {
+        return terminalEmitted.compareAndSet(false, true);
     }
 
     public void setReason(String reason) {

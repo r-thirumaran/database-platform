@@ -10,18 +10,32 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Admission control: per (application, datasource) and per datasource caps on live proxy connections.
- * Check-and-register is atomic so concurrent handshakes cannot overshoot the limit.
+ * Admission control: per (application, datasource) and per datasource caps on live proxy connections,
+ * plus an optional per-datasource cap for connections without a resolved application
+ * ({@code DBP_PROXY_UNKNOWN_APP_MAX_CONNECTIONS}: identity NONE or an undeclared service alias), so an
+ * unregistered caller cannot sidestep the per-application quotas. Check-and-register is atomic so
+ * concurrent handshakes cannot overshoot a limit.
  */
 public final class QuotaManager {
     private final ConnectionRegistry registry;
+    private final int unknownAppMaxConnections;
     private volatile Limits limits = new Limits(Map.of(), Map.of());
 
     private record Limits(Map<String, Integer> appDs, Map<String, Integer> ds) {
     }
 
     public QuotaManager(ConnectionRegistry registry) {
+        this(registry, 0);
+    }
+
+    /** @param unknownAppMaxConnections per-datasource cap for connections with no application id; 0 = unlimited */
+    public QuotaManager(ConnectionRegistry registry, int unknownAppMaxConnections) {
         this.registry = registry;
+        this.unknownAppMaxConnections = Math.max(0, unknownAppMaxConnections);
+    }
+
+    public int unknownAppMaxConnections() {
+        return unknownAppMaxConnections;
     }
 
     public void update(List<QuotaConfig> quotas, List<DatasourceQuotaConfig> dsQuotas) {
@@ -53,6 +67,13 @@ public final class QuotaManager {
             int used = registry.count(o -> sameApp(o, c) && sameDs(o, c));
             if (used >= appLimit) {
                 return "quota exceeded: " + c.application() + "/" + c.datasource() + " " + used + "/" + appLimit;
+            }
+        }
+        if (unknownAppMaxConnections > 0 && c.applicationId() == null) {
+            int used = registry.count(o -> o.applicationId() == null && sameDs(o, c));
+            if (used >= unknownAppMaxConnections) {
+                return "unknown-application quota exceeded: " + (c.datasource() == null ? "(no datasource)" : c.datasource())
+                        + " " + used + "/" + unknownAppMaxConnections + " (application '" + c.application() + "' is not registered)";
             }
         }
         Integer dsLimit = lookupDs(l, c);

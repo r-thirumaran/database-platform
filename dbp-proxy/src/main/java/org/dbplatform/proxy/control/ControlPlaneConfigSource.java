@@ -28,8 +28,9 @@ import java.util.function.Consumer;
  * Control-plane mode: fetches {@code GET /api/v1/internal/proxy/config?proxyId=…} at start, polls
  * {@code GET /api/v1/internal/config-version} every {@code DBP_CONFIG_POLL_SECONDS} and re-fetches on
  * change, and posts a {@link Heartbeat} with a live-connection snapshot every {@code DBP_HEARTBEAT_SECONDS}.
- * A heartbeat reply carrying a newer version also triggers a reload. All loops run on virtual threads and
- * survive control-plane outages (the last good configuration stays in force).
+ * A heartbeat reply carrying a newer version also triggers a reload. Every poll also runs the maintenance
+ * hook (listener re-bind). All loops run on virtual threads and survive control-plane outages (the last
+ * good configuration stays in force).
  */
 public final class ControlPlaneConfigSource implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(ControlPlaneConfigSource.class);
@@ -39,6 +40,7 @@ public final class ControlPlaneConfigSource implements AutoCloseable {
     private final TelemetryClient telemetry;
     private final ConnectionRegistry registry;
     private final Consumer<ProxyConfigDocument> onConfig;
+    private final Runnable onPoll;
     private final String version;
     private final Instant startedAt = Instant.now();
     private final ReentrantLock reloadLock = new ReentrantLock();
@@ -51,12 +53,23 @@ public final class ControlPlaneConfigSource implements AutoCloseable {
 
     public ControlPlaneConfigSource(ProxySettings settings, ControlPlaneClient client, TelemetryClient telemetry,
                                     ConnectionRegistry registry, String version, Consumer<ProxyConfigDocument> onConfig) {
+        this(settings, client, telemetry, registry, version, onConfig, null);
+    }
+
+    /**
+     * @param onPoll run once per poll after the version check, whether or not the control plane answered —
+     *               used to re-bind listeners that failed to bind ({@code ProxyServer::repair}); may be null
+     */
+    public ControlPlaneConfigSource(ProxySettings settings, ControlPlaneClient client, TelemetryClient telemetry,
+                                    ConnectionRegistry registry, String version, Consumer<ProxyConfigDocument> onConfig,
+                                    Runnable onPoll) {
         this.settings = settings;
         this.client = client;
         this.telemetry = telemetry;
         this.registry = registry;
         this.version = version;
         this.onConfig = onConfig;
+        this.onPoll = onPoll == null ? () -> { } : onPoll;
     }
 
     /** Fetch and apply the initial configuration, retrying until it succeeds (or {@code maxAttempts} is reached, 0 = forever). */
@@ -146,6 +159,16 @@ public final class ControlPlaneConfigSource implements AutoCloseable {
             } catch (RuntimeException e) {
                 LOG.warn("config poll failed: {}", e.toString());
             }
+            maintenance();
+        }
+    }
+
+    /** Listener repair (failed bind at start-up, dead accept loop) is retried at most once per poll. */
+    private void maintenance() {
+        try {
+            onPoll.run();
+        } catch (RuntimeException e) {
+            LOG.warn("periodic maintenance failed: {}", e.toString());
         }
     }
 

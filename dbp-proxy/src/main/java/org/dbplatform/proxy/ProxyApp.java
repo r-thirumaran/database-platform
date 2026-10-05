@@ -46,7 +46,7 @@ public final class ProxyApp implements AutoCloseable {
         this.settings = settings;
         this.registry = new ConnectionRegistry();
         this.metrics = new ProxyMetrics(registry);
-        QuotaManager quotas = new QuotaManager(registry);
+        QuotaManager quotas = new QuotaManager(registry, settings.unknownAppMaxConnections());
 
         ConnectionEvents events = eventsOverride;
         if (settings.controlPlaneMode()) {
@@ -70,11 +70,11 @@ public final class ProxyApp implements AutoCloseable {
         this.server = new ProxyServer(rt);
 
         if (settings.controlPlaneMode()) {
-            this.controlPlaneSource = new ControlPlaneConfigSource(settings, controlPlane, telemetry, registry, VERSION, server::apply);
+            this.controlPlaneSource = new ControlPlaneConfigSource(settings, controlPlane, telemetry, registry, VERSION, server::apply, server::repair);
             this.staticSource = null;
         } else if (settings.staticConfigPath() != null) {
             this.controlPlaneSource = null;
-            this.staticSource = new StaticConfigSource(Path.of(settings.staticConfigPath()), settings.configPollSeconds(), server::apply);
+            this.staticSource = new StaticConfigSource(Path.of(settings.staticConfigPath()), settings.configPollSeconds(), server::apply, server::repair);
         } else {
             this.controlPlaneSource = null;
             this.staticSource = null;

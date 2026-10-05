@@ -40,6 +40,7 @@ export const SourceBadge = ({ source }: { source: RelationshipSource | Dependenc
 
 const KIND_TONE: Record<RelationshipKind | EdgeKind, Tone> = {
   READS: 'blue', WRITES: 'orange', CALLS: 'pink', REFERENCES: 'muted', FOREIGN_KEY: 'teal', TRIGGERS: 'red', OWNS: 'violet', HOSTS: 'muted', MIGRATES_TO: 'green', BELONGS_TO: 'muted',
+  ROUTES_TO: 'blue', PRODUCES: 'orange', GRANTED: 'muted',
 };
 export const KindBadge = ({ kind }: { kind: RelationshipKind | EdgeKind | string }) => <Badge tone={KIND_TONE[kind as EdgeKind] ?? ''}>{kind.replace('_', ' ')}</Badge>;
 
@@ -59,7 +60,7 @@ export const MigrationBadge = ({ state }: { state: MigrationState }) => <Badge t
 const APPKIND_TONE: Record<ApplicationKind, Tone> = { SERVICE: 'blue', BATCH: 'violet', UI: 'teal', LEGACY: 'amber', TOOL: 'muted' };
 export const AppKindBadge = ({ kind }: { kind: ApplicationKind }) => <Badge tone={APPKIND_TONE[kind]} outline>{kind}</Badge>;
 
-const RKIND_TONE: Record<RoutineKind, Tone> = { PROCEDURE: 'pink', FUNCTION: 'pink', PACKAGE: 'violet', PACKAGE_BODY: 'violet', TRIGGER: 'red', VIEW: 'teal' };
+const RKIND_TONE: Record<RoutineKind | 'VIEW', Tone> = { PROCEDURE: 'pink', FUNCTION: 'pink', PACKAGE: 'violet', PACKAGE_BODY: 'violet', TRIGGER: 'red', VIEW: 'teal' };
 export const RoutineKindBadge = ({ kind }: { kind: RoutineKind | string | undefined }) => (kind ? <Badge tone={RKIND_TONE[kind as RoutineKind] ?? ''} outline>{kind.replace('_', ' ')}</Badge> : null);
 export const TableKindBadge = ({ kind }: { kind: TableKind | string | undefined }) => (kind && kind !== 'TABLE' ? <Badge outline>{kind.replace('_', ' ')}</Badge> : null);
 

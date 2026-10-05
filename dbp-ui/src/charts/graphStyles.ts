@@ -15,4 +15,7 @@ export const EDGE_STYLE: Record<EdgeKind, { color: string; style: 'solid' | 'das
   HOSTS: { color: 'var(--border-strong)', style: 'dotted', width: 1, label: 'hosts' },
   MIGRATES_TO: { color: 'var(--series-6)', style: 'dashed', width: 2, label: 'migrates to' },
   BELONGS_TO: { color: 'var(--border-strong)', style: 'dotted', width: 1, label: 'belongs to' },
+  ROUTES_TO: { color: 'var(--series-4)', style: 'solid', width: 1.5, label: 'routes to' },
+  PRODUCES: { color: 'var(--series-2)', style: 'dashed', width: 1.5, label: 'produces' },
+  GRANTED: { color: 'var(--series-6)', style: 'dotted', width: 1, label: 'granted' },
 };

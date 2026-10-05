@@ -10,7 +10,7 @@ import { Badge, EngineBadge, RoutineKindBadge } from '../../components/Badge';
 import { RelativeTime } from '../../components/RelativeTime';
 import { links } from '../../lib/links';
 
-const KINDS = ['PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE_BODY', 'TRIGGER', 'VIEW'];
+const KINDS = ['PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE_BODY', 'TRIGGER'];
 
 export function RoutinesPage() {
   const [sp, setSp] = useSearchParams();
@@ -24,7 +24,7 @@ export function RoutinesPage() {
   const set = (k: string, v: string) => { const n = new URLSearchParams(sp); if (v) n.set(k, v); else n.delete(k); setSp(n, { replace: true }); };
   return (
     <>
-      <PageHeader title="Routines" subtitle="Procedures, functions, packages, triggers and views crawled from the data dictionary." />
+      <PageHeader title="Routines" subtitle="Procedures, functions, packages and triggers crawled from the data dictionary (views are listed in the table catalogue)." />
       <div className="filters">
         <div className="field grow"><label htmlFor="rt-q">Search</label><div className="search"><Search /><input id="rt-q" className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="SCHEMA.NAME" /></div></div>
         <div className="field"><label htmlFor="rt-db">Database</label><select id="rt-db" className="input" value={databaseId} onChange={(e) => set('databaseId', e.target.value)}><option value="">all</option>{dbs.data?.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</select></div>

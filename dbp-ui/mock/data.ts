@@ -81,6 +81,7 @@ export const ID = {
   cred: { oracle: 'cred-sales-oracle-platform', postgres: 'cred-sales-postgres-platform', reader: 'cred-oracle-readonly' },
   ds: { sales: 'ds-sales', inventory: 'ds-inventory', payments: 'ds-payments' },
   tbl: {
+    vCustomerOrders: 'tbl-sales-v-customer-orders',
     customer: 'tbl-sales-customer',
     product: 'tbl-sales-product',
     orders: 'tbl-sales-orders',
@@ -103,7 +104,6 @@ export const ID = {
     customerTier: 'rtn-get-customer-tier',
     trgOrdersAudit: 'rtn-trg-orders-audit',
     trgOrderItemStock: 'rtn-trg-order-item-stock',
-    vCustomerOrders: 'rtn-v-customer-orders',
   },
 } as const;
 
@@ -331,8 +331,12 @@ const routines: Routine[] = [
   routine(ID.rtn.customerTier, 'GET_CUSTOMER_TIER', 'FUNCTION', { ownerTeamId: ID.team.cx, lastSeenAt: ago(9 * HOUR) }),
   routine(ID.rtn.trgOrdersAudit, 'TRG_ORDERS_AUDIT', 'TRIGGER', { triggerTableId: ID.tbl.orders, triggerEvent: 'AFTER INSERT OR UPDATE', ownerTeamId: null }),
   routine(ID.rtn.trgOrderItemStock, 'TRG_ORDER_ITEM_STOCK', 'TRIGGER', { triggerTableId: ID.tbl.orderItem, triggerEvent: 'AFTER INSERT', ownerTeamId: ID.team.inventory }),
-  routine(ID.rtn.vCustomerOrders, 'V_CUSTOMER_ORDERS', 'VIEW', { ownerTeamId: ID.team.cx, status: 'VALID', lastSeenAt: ago(40_000) }),
 ];
+
+// Views are catalogued as tables of kind VIEW; they reference their base tables through REFERENCES dependencies.
+tables.push(table(ID.tbl.vCustomerOrders, ID.db.oracle, 'SALES', 'V_CUSTOMER_ORDERS', {
+  kind: 'VIEW', ownerTeamId: ID.team.cx, ownerConfirmed: true, ownerSource: 'DECLARED', description: 'Customer orders joined with the customer master.', lastSeenAt: ago(40_000),
+}));
 
 // ------------------------------------------------------------------ dependencies (object → object)
 let depSeq = 0;
@@ -362,8 +366,8 @@ const dependencies: Dependency[] = [
   dep('TABLE', ID.tbl.orderItem, 'TABLE', ID.tbl.product, 'FOREIGN_KEY'),
   dep('TABLE', ID.tbl.inventory, 'TABLE', ID.tbl.product, 'FOREIGN_KEY'),
   dep('TABLE', ID.tbl.payment, 'TABLE', ID.tbl.orders, 'FOREIGN_KEY'),
-  dep('ROUTINE', ID.rtn.vCustomerOrders, 'TABLE', ID.tbl.customer, 'REFERENCES'),
-  dep('ROUTINE', ID.rtn.vCustomerOrders, 'TABLE', ID.tbl.orders, 'REFERENCES'),
+  dep('TABLE', ID.tbl.vCustomerOrders, 'TABLE', ID.tbl.customer, 'REFERENCES'),
+  dep('TABLE', ID.tbl.vCustomerOrders, 'TABLE', ID.tbl.orders, 'REFERENCES'),
   dep('ROUTINE', ID.rtn.placeOrder, 'TABLE', ID.tbl.pgOrders, 'WRITES', { source: 'DECLARED', confidence: 1.0, firstSeenAt: ago(20 * DAY) }),
   dep('TABLE', ID.tbl.pgOrders, 'TABLE', ID.tbl.pgCustomer, 'FOREIGN_KEY'),
   dep('TABLE', ID.tbl.pgOrderItem, 'TABLE', ID.tbl.pgOrders, 'FOREIGN_KEY'),
@@ -412,8 +416,8 @@ const relationships: Relationship[] = [
   rel(ID.app.portal, 'TABLE', ID.tbl.customer, 'READS', 'GATEWAY', 420_000, { lastSeenAt: ago(3_000) }),
   rel(ID.app.portal, 'TABLE', ID.tbl.customer, 'WRITES', 'GATEWAY', 18_000, { lastSeenAt: ago(60_000) }),
   rel(ID.app.portal, 'TABLE', ID.tbl.orders, 'READS', 'GATEWAY', 310_000, { lastSeenAt: ago(3_000) }),
-  rel(ID.app.portal, 'ROUTINE', ID.rtn.vCustomerOrders, 'READS', 'GATEWAY', 150_000, { lastSeenAt: ago(3_000) }),
-  rel(ID.app.portal, 'TABLE', ID.tbl.orders, 'READS', 'GATEWAY', 150_000, { viaRoutineId: ID.rtn.vCustomerOrders, lastSeenAt: ago(3_000) }),
+  rel(ID.app.portal, 'TABLE', ID.tbl.vCustomerOrders, 'READS', 'GATEWAY', 150_000, { lastSeenAt: ago(3_000) }),
+  rel(ID.app.portal, 'TABLE', ID.tbl.orders, 'READS', 'GATEWAY', 150_000, { lastSeenAt: ago(3_000) }),
   // legacy-billing: through the proxy, attribution by correlation / collector
   rel(ID.app.billing, 'TABLE', ID.tbl.payment, 'WRITES', 'PROXY_CORRELATION', 6_200, { lastSeenAt: ago(12 * MIN) }),
   rel(ID.app.billing, 'TABLE', ID.tbl.payment, 'READS', 'PROXY_CORRELATION', 15_900, { lastSeenAt: ago(12 * MIN) }),

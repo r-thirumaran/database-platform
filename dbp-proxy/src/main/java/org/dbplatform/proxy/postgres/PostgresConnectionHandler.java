@@ -15,29 +15,38 @@ import java.io.IOException;
 
 /**
  * PostgreSQL startup handshake: answers SSLRequest / GSSENCRequest with {@code N} (no TLS between client
- * and proxy in the POC), forwards CancelRequest to the listener's default backend, and for a
- * StartupMessage routes on {@code database} (accepting {@code <match>.<alias>}), rewrites the database
- * name when the route says so and then becomes a transparent pump. Refusals are FATAL ErrorResponses with
- * SQLSTATE 53300 (quota / cap), 3D000 (unknown database) or 08001 (backend unreachable).
+ * and proxy in the POC; at most {@value #MAX_ENCRYPTION_REQUESTS} such requests are tolerated), forwards
+ * CancelRequest to the listener's default backend, and for a StartupMessage routes on {@code database}
+ * (accepting {@code <match>.<alias>}), rewrites the database name when the route says so and then becomes
+ * a transparent pump. Refusals are FATAL ErrorResponses with SQLSTATE 53300 (quota / cap), 3D000 (unknown
+ * database, undeclared alias in strict mode) or 08001 (backend unreachable). Every read of the handshake
+ * is bounded by the connection's handshake deadline.
  */
 public final class PostgresConnectionHandler implements ConnectionHandler {
     private static final Logger LOG = LoggerFactory.getLogger(PostgresConnectionHandler.class);
     private static final byte[] NO_SSL = {'N'};
+    /** A real client sends at most one SSLRequest and one GSSENCRequest before its StartupMessage. */
+    static final int MAX_ENCRYPTION_REQUESTS = 2;
 
     @Override
     public void handle(ConnectionContext ctx) throws IOException {
         LiveConnection live = ctx.live();
         ListenerConfig cfg = ctx.config();
-        ctx.setHandshakeTimeout();
 
         PgStartupMessage msg;
+        int encryptionRequests = 0;
         while (true) {
+            ctx.armClientHandshakeTimeout();
             msg = PgStartupMessage.read(ctx.clientIn());
             if (msg == null) {
                 ctx.closed("client closed before startup");
                 return;
             }
             if (msg.isSslRequest() || msg.isGssEncRequest()) {
+                if (++encryptionRequests > MAX_ENCRYPTION_REQUESTS) {
+                    throw new PgProtocolException("more than " + MAX_ENCRYPTION_REQUESTS
+                            + " SSL/GSS encryption requests before the StartupMessage");
+                }
                 ctx.writeClient(NO_SSL);
                 continue;
             }
@@ -57,8 +66,10 @@ public final class PostgresConnectionHandler implements ConnectionHandler {
         live.setRequestedService(database);
         live.setDbUser(msg.user());
         live.setProgram(msg.applicationName());
+        // sanitised copies (control characters replaced) for everything that reaches logs, events and error messages
+        String shownDatabase = live.requestedService();
         LOG.debug("{} startup protocol {}.{} user={} database={} application_name={}", live.id(), msg.protocolMajor(),
-                msg.protocolMinor(), msg.user(), database, msg.applicationName());
+                msg.protocolMinor(), live.dbUser(), shownDatabase, live.program());
 
         if (ctx.capReason() != null) {
             refuse(ctx, PgErrorResponse.TOO_MANY_CONNECTIONS, "too many connections for listener '" + cfg.name() + "'", ctx.capReason(), "listener_cap");
@@ -66,8 +77,8 @@ public final class PostgresConnectionHandler implements ConnectionHandler {
         }
         RouteDecision decision = Router.route(cfg, database);
         if (decision == null) {
-            refuse(ctx, PgErrorResponse.INVALID_CATALOG_NAME, "database \"" + database + "\" is not routed by proxy listener '" + cfg.name() + "'",
-                    "unknown database '" + database + "' on listener '" + cfg.name() + "'", "unknown_service");
+            refuse(ctx, PgErrorResponse.INVALID_CATALOG_NAME, "database \"" + shownDatabase + "\" is not routed by proxy listener '" + cfg.name() + "'",
+                    "unknown database '" + shownDatabase + "' on listener '" + cfg.name() + "'", "unknown_service");
             return;
         }
         live.setIdentity(ctx.identity().resolve(new IdentityInput(decision.alias(), null, msg.applicationName(), null,
@@ -75,6 +86,14 @@ public final class PostgresConnectionHandler implements ConnectionHandler {
         live.setDatasource(decision.datasourceId(), decision.datasource(), decision.route().databaseId());
         String resolved = decision.resolvedService() != null ? decision.resolvedService() : database;
         live.setResolvedService(resolved);
+
+        if (ctx.settings().strictAliases() && decision.alias() != null && live.applicationId() == null) {
+            refuse(ctx, PgErrorResponse.INVALID_CATALOG_NAME, "database \"" + shownDatabase + "\": application alias \""
+                            + live.application() + "\" is not declared",
+                    "undeclared application alias '" + live.application() + "' in database '" + shownDatabase
+                            + "' (DBP_PROXY_STRICT_ALIASES=true)", "undeclared_alias");
+            return;
+        }
 
         String quota = ctx.admit();
         if (quota != null) {

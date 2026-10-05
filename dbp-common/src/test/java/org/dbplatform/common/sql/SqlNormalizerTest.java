@@ -51,6 +51,25 @@ class SqlNormalizerTest {
     }
 
     @Test
+    void postgresEscapeStringsHonourBackslashesButPlainStringsDoNot() {
+        // E'\'' is one literal containing a quote: the WHERE clause must survive
+        assertThat(SqlNormalizer.normalize("SELECT E'\\'' FROM t WHERE b = 1")).isEqualTo("SELECT ? FROM t WHERE b = ?");
+        assertThat(SqlNormalizer.normalize("SELECT e'a\\\\' FROM t WHERE b = 1")).isEqualTo("SELECT ? FROM t WHERE b = ?");
+        assertThat(SqlNormalizer.normalize("SELECT E'a\\nb', E'it''s' FROM t WHERE b = 1")).isEqualTo("SELECT ?, ? FROM t WHERE b = ?");
+        assertThat(SqlNormalizer.scrub("SELECT E'\\'' FROM t WHERE b = 1")).isEqualTo("SELECT '' FROM t WHERE b = 1");
+        // in a plain literal a backslash is an ordinary character (standard_conforming_strings, Oracle, SQL Server)
+        assertThat(SqlNormalizer.normalize("SELECT 'x\\' FROM t WHERE b = 1")).isEqualTo("SELECT ? FROM t WHERE b = ?");
+        assertThat(SqlNormalizer.normalize("SELECT N'x\\' FROM t WHERE b = 1")).isEqualTo("SELECT ? FROM t WHERE b = ?");
+        // '' escaping still works everywhere, and a column that happens to be called e is not a prefix
+        assertThat(SqlNormalizer.normalize("SELECT 'it''s' FROM t WHERE e='x' AND b = 1")).isEqualTo("SELECT ? FROM t WHERE e=? AND b = ?");
+        // Oracle alternative quoting is untouched by the escape rule
+        assertThat(SqlNormalizer.normalize("SELECT q'[a\\]' FROM dual WHERE b = 1")).isEqualTo("SELECT ? FROM dual WHERE b = ?");
+        assertThat(SqlNormalizer.normalize("SELECT q'[it's]' FROM dual WHERE b = 1")).isEqualTo("SELECT ? FROM dual WHERE b = ?");
+        // unterminated escape string never runs past the end
+        assertThat(SqlNormalizer.normalize("SELECT E'\\'")).isEqualTo("SELECT ?");
+    }
+
+    @Test
     void scrubRemovesCommentsAndLiteralContentOnly() {
         assertThat(SqlNormalizer.scrub("SELECT /*+ hint */ a FROM t -- c\n WHERE b = 'it''s' AND n = 42 AND x = :1"))
                 .isEqualTo("SELECT a FROM t WHERE b = '' AND n = 42 AND x = :1");

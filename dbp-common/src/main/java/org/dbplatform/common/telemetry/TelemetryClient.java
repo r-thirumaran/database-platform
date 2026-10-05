@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -27,8 +28,9 @@ import java.util.concurrent.locks.ReentrantLock;
  * {@code <controlPlaneUrl>/api/v1/internal/telemetry/{queries|connections|pools}} every
  * {@code flushInterval} (default {@value #DEFAULT_FLUSH_INTERVAL_MS} ms) or as soon as a full batch
  * accumulates. When the queue is full the oldest events are dropped and counted
- * ({@link #droppedCount()}). When the control plane is unreachable the batch is re-queued at the head
- * and retried after {@code flushInterval}. Nothing in this class ever throws to the caller.
+ * ({@link #droppedCount()}). A batch is sent as one POST per event kind; when a POST fails only the
+ * events of that POST are re-queued at the head and retried after {@code flushInterval} — events whose
+ * POST succeeded in the same cycle are never sent twice. Nothing in this class ever throws to the caller.
  */
 public final class TelemetryClient implements AutoCloseable {
 
@@ -239,8 +241,9 @@ public final class TelemetryClient implements AutoCloseable {
                 if (batch.isEmpty()) {
                     continue;
                 }
-                if (!send(batch)) {
-                    requeueAtHead(batch);
+                List<Envelope> failed = send(batch);
+                if (!failed.isEmpty()) {
+                    requeueAtHead(failed);
                     backoff();
                 }
             }
@@ -328,8 +331,9 @@ public final class TelemetryClient implements AutoCloseable {
             if (batch.isEmpty()) {
                 return;
             }
-            if (!send(batch)) {
-                dropped.addAndGet(batch.size());
+            List<Envelope> failed = send(batch);
+            if (!failed.isEmpty()) {
+                dropped.addAndGet(failed.size());
                 // give up on the rest as well: the control plane is unreachable while we shut down
                 lock.lock();
                 try {
@@ -343,19 +347,31 @@ public final class TelemetryClient implements AutoCloseable {
         }
     }
 
-    /** Groups the batch by kind and POSTs each group; returns false when any POST failed (the whole batch is retried). */
-    private boolean send(List<Envelope> batch) {
+    /**
+     * Groups the batch by kind and POSTs each group. Returns the envelopes whose POST failed and must be
+     * retried, in their original order — never the ones that were delivered (or dropped) by this call.
+     */
+    private List<Envelope> send(List<Envelope> batch) {
         Map<Kind, List<Object>> groups = new EnumMap<>(Kind.class);
         for (Envelope e : batch) {
             groups.computeIfAbsent(e.kind(), k -> new ArrayList<>()).add(e.event());
         }
-        boolean ok = true;
+        EnumSet<Kind> failedKinds = EnumSet.noneOf(Kind.class);
         for (Map.Entry<Kind, List<Object>> g : groups.entrySet()) {
             if (!post(g.getKey(), g.getValue())) {
-                ok = false;
+                failedKinds.add(g.getKey());
             }
         }
-        return ok;
+        if (failedKinds.isEmpty()) {
+            return List.of();
+        }
+        List<Envelope> failed = new ArrayList<>();
+        for (Envelope e : batch) {
+            if (failedKinds.contains(e.kind())) {
+                failed.add(e);
+            }
+        }
+        return failed;
     }
 
     private boolean post(Kind kind, List<Object> events) {

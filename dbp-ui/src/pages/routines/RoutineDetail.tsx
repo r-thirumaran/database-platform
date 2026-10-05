@@ -9,6 +9,7 @@ import { RelativeTime } from '../../components/RelativeTime';
 import { links } from '../../lib/links';
 import { CopyId } from '../../components/CopyId';
 import { DataTable } from '../../components/DataTable';
+import { compact } from '../../lib/format';
 
 export function RoutineDetail() {
   const { id = '' } = useParams();
@@ -22,16 +23,18 @@ function RoutineView({ s }: { s: RoutineSummary }) {
   const r = s.routine;
   const dbs = useDatabases();
   const teams = useTeams();
-  const db = dbs.data?.find((d) => d.id === r.databaseId);
-  const team = teams.data?.find((t) => t.id === r.ownerTeamId);
+  const db = s.database ?? dbs.data?.find((d) => d.id === r.databaseId);
+  const team = s.ownerTeam ?? teams.data?.find((t) => t.id === r.ownerTeamId);
   const fq = `${r.schema}.${r.name}`;
   const outgoing = s.dependencies.filter((d) => d.fromId === r.id);
-  const incoming = s.dependencies.filter((d) => d.toId === r.id);
+  // The contract returns incoming dependencies as `referencedBy`; older servers only had `dependencies`.
+  const incoming = s.referencedBy ?? s.dependencies.filter((d) => d.toId === r.id);
+  const triggerTableLabel = s.triggerTable ? `${s.triggerTable.schema}.${s.triggerTable.name}` : 'table';
   const linkFor = (type: 'TABLE' | 'ROUTINE', id: string) => (type === 'TABLE' ? links.table(id) : links.routine(id));
   return (
     <>
       <PageHeader title={fq} crumb={fq} badges={<><RoutineKindBadge kind={r.kind} /><EngineBadge engine={db?.engine} /><Badge tone={r.status === 'VALID' ? 'green' : 'red'}>{r.status}</Badge></>}
-        subtitle={<span className="row">{r.kind === 'TRIGGER' && r.triggerTableId ? <span>{r.triggerEvent} on <Link to={links.table(r.triggerTableId)}>table</Link></span> : null}<CopyId value={r.id} /></span>}
+        subtitle={<span className="row">{r.kind === 'TRIGGER' && r.triggerTableId ? <span>{r.triggerEvent} on <Link to={links.table(r.triggerTableId)}>{triggerTableLabel}</Link></span> : null}<CopyId value={r.id} /></span>}
         actions={<Link className="btn" to={links.graph(`routine:${r.id}`, 2)}>Open in graph</Link>} />
       <div className="grid cols-3">
         <Card title="Details">
@@ -39,13 +42,22 @@ function RoutineView({ s }: { s: RoutineSummary }) {
             ['Database', db ? <Link to={links.database(db.id)}>{db.name}</Link> : r.databaseId],
             ['Schema', r.schema],
             ['Owner', team ? <Link to={links.team(team.id)}>{team.displayName}</Link> : <span className="muted">unowned</span>],
-            ['Trigger', r.triggerTableId ? <span>{r.triggerEvent} · <Link to={links.table(r.triggerTableId)}>table</Link></span> : null],
+            ['Trigger', r.triggerTableId ? <span>{r.triggerEvent} · <Link to={links.table(r.triggerTableId)}>{triggerTableLabel}</Link></span> : null],
             ['Last DDL', <RelativeTime value={r.lastDdlAt} />],
             ['Last seen', <RelativeTime value={r.lastSeenAt} staleDays={30} />],
           ]} />
         </Card>
         <Card title="Callers" hint="applications observed calling it">
-          {s.callers.length === 0 ? <EmptyState inline title="No callers observed" /> : <div className="stack" style={{ gap: 6 }}>{s.callers.map((a) => <div key={a.id} className="row between"><Link to={links.application(a.id)}>{a.name}</Link><span className="muted small">{a.kind}</span></div>)}</div>}
+          {s.callers.length === 0 ? <EmptyState inline title="No callers observed" /> : (
+            <div className="stack" style={{ gap: 6 }}>
+              {s.callers.map((c, i) => (
+                <div key={`${c.application.id}-${c.source ?? ''}-${i}`} className="row between">
+                  <span className="row" style={{ gap: 6 }}><Link to={links.application(c.application.id)}>{c.application.name}</Link>{c.team && <span className="muted small">{c.team.name}</span>}</span>
+                  <span className="row" style={{ gap: 6 }}><SourceBadge source={c.source} /><span className="muted small" title="calls observed">{compact(c.queryCount)}</span></span>
+                </div>
+              ))}
+            </div>
+          )}
         </Card>
         <Card title="Tables touched" hint="transitively through dependencies">
           {s.tables.length === 0 ? <EmptyState inline title="No table dependencies" /> : <div className="inline-list">{s.tables.map((t) => <Link key={t.id} to={links.table(t.id)} className="badge outline">{t.schema}.{t.name}</Link>)}</div>}
