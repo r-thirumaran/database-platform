@@ -95,7 +95,7 @@
     {
       "title": "Proxy admin",
       "type": "link",
-      "url": "http://localhost:7431/connections",
+      "url": "http://localhost:8080/connections",
       "targetBlank": true
     }
   ],
