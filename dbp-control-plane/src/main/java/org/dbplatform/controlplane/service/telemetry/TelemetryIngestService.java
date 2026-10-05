@@ -137,7 +137,7 @@ public class TelemetryIngestService {
     }
 
     private void aggregate(QueryEvent e, Instant ts, Application app, DatabaseInstance db, List<Map<String, String>> tableRefs) {
-        String hash = e.sqlHash() != null && !e.sqlHash().isBlank() ? e.sqlHash() : org.dbplatform.common.sql.SqlAnalyzer.hash(e.sqlNormalized() == null ? "" : e.sqlNormalized());
+        String hash = e.sqlHash() != null && !e.sqlHash().isBlank() ? e.sqlHash() : org.dbplatform.controlplane.service.SecretCipher.sha256Hex(e.sqlNormalized() == null ? "" : e.sqlNormalized());
         Instant bucket = ts.truncatedTo(ChronoUnit.HOURS);
         String appId = app == null ? null : app.getId();
         String dbId = db == null ? null : db.getId();

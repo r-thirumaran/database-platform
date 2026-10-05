@@ -8,7 +8,26 @@
         <artifactId>dbp-parent</artifactId>
         <version>0.1.0-SNAPSHOT</version>
     </parent>
+
     <artifactId>dbp-examples</artifactId>
     <packaging>pom</packaging>
     <name>dbp-examples</name>
+    <description>
+        Example applications of the Database Access Platform: a Spring Boot service that runs unchanged in
+        direct / proxy / gateway mode, a legacy Oracle application onboarded through the proxy, and a
+        plain-Java batch job that shows the many-logical-to-few-physical connection effect of the gateway.
+    </description>
+
+    <modules>
+        <module>orders-service</module>
+        <module>reporting-batch</module>
+        <module>legacy-reporting</module>
+    </modules>
+
+    <!--
+      Build without the reactor (e.g. before dbp-jdbc has been built):
+        mvn -f dbp-examples/pom.xml package -DskipTests -Ddbp.jdbc.skip
+      Full build with the platform driver bundled (needed for gateway mode):
+        mvn -pl dbp-examples/orders-service,dbp-examples/reporting-batch -am package -DskipTests
+    -->
 </project>

@@ -1,0 +1,28 @@
+# legacy-reporting: Oracle thin via the proxy. Nothing but the URL (and the program name for
+# attribution) differs from how this application talked to the database before the platform existed.
+spring:
+  application:
+    name: legacy-reporting
+  datasource:
+    # before: jdbc:oracle:thin:@//oracle:1521/FREEPDB1   after: the proxy with the service alias
+    url: jdbc:oracle:thin:@//${PROXY_HOST:proxy}:${PROXY_PORT:1521}/${PROXY_SERVICE:sales.legacy-reporting}
+    username: ${SALES_APP_USER:SALES_APP}
+    password: "${SALES_APP_PASSWORD:SalesApp#Demo2026}"
+    hikari:
+      pool-name: legacy-reporting
+      maximum-pool-size: ${LEGACY_POOL_SIZE:5}
+      minimum-idle: 1
+      connection-timeout: 10000
+      initialization-fail-timeout: -1
+      data-source-properties:
+        "[v$session.program]": legacy-reporting
+        "[oracle.jdbc.ReadTimeout]": "60000"
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics

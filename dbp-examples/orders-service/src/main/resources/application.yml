@@ -1,0 +1,99 @@
+# orders-service: one configuration file, four modes. Select with SPRING_PROFILES_ACTIVE=direct|proxy|gateway|postgres-direct
+spring:
+  application:
+    name: orders-service
+  datasource:
+    hikari:
+      pool-name: orders-service
+      maximum-pool-size: ${ORDERS_POOL_SIZE:10}
+      minimum-idle: ${ORDERS_POOL_MIN_IDLE:2}
+      connection-timeout: 10000
+      # start even when the database is still initialising (Oracle Free needs a few minutes)
+      initialization-fail-timeout: -1
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: orders-service
+
+dbp:
+  demo:
+    # ORACLE (default) or POSTGRES: picks the SqlDialect for the handful of engine specific statements
+    engine: ${DBP_DEMO_ENGINE:ORACLE}
+
+logging:
+  level:
+    org.dbplatform: INFO
+    com.zaxxer.hikari: INFO
+
+---
+# direct: Oracle thin driver straight to the database, bypassing the platform.
+# The collector still attributes the sessions through V$SESSION.PROGRAM (identity rule programNames).
+spring:
+  config:
+    activate:
+      on-profile: direct
+  datasource:
+    url: jdbc:oracle:thin:@//${ORACLE_HOST:oracle}:${ORACLE_PORT:1521}/${ORACLE_SERVICE:FREEPDB1}
+    username: ${SALES_APP_USER:SALES_APP}
+    password: "${SALES_APP_PASSWORD:SalesApp#Demo2026}"
+    hikari:
+      data-source-properties:
+        "[v$session.program]": orders-service
+        "[oracle.jdbc.ReadTimeout]": "60000"
+
+---
+# proxy: same driver, same credentials, only the host and the service name change.
+# "sales.orders-service" = datasource "sales" + application alias; the proxy rewrites it to FREEPDB1.
+spring:
+  config:
+    activate:
+      on-profile: proxy
+  datasource:
+    url: jdbc:oracle:thin:@//${PROXY_HOST:proxy}:${PROXY_PORT:1521}/${PROXY_SERVICE:sales.orders-service}
+    username: ${SALES_APP_USER:SALES_APP}
+    password: "${SALES_APP_PASSWORD:SalesApp#Demo2026}"
+    hikari:
+      data-source-properties:
+        "[v$session.program]": orders-service
+        "[oracle.jdbc.ReadTimeout]": "60000"
+
+---
+# gateway: platform driver. username is informational, password carries the API key
+# (the driver uses password as apiKey when the URL has no apiKey property).
+spring:
+  config:
+    activate:
+      on-profile: gateway
+  datasource:
+    driver-class-name: org.dbplatform.jdbc.DbpDriver
+    url: jdbc:dbp://${DBP_GATEWAY_HOST:gateway}:${DBP_GATEWAY_PORT:7420}/${DBP_DATASOURCE:sales}
+    username: orders-service
+    password: "${DBP_API_KEY:}"
+    hikari:
+      data-source-properties:
+        "[clientInfo.ApplicationName]": orders-service
+
+---
+# postgres-direct: the migration target, PostgreSQL driver straight to the database.
+spring:
+  config:
+    activate:
+      on-profile: postgres-direct
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:postgres}:${POSTGRES_PORT:5432}/${POSTGRES_DB:sales}?ApplicationName=orders-service&escapeSyntaxCallMode=callIfNoReturn
+    username: ${SALES_APP_USER:sales_app}
+    password: "${SALES_APP_PASSWORD:SalesApp#Demo2026}"
+dbp:
+  demo:
+    engine: ${DBP_DEMO_ENGINE:POSTGRES}
