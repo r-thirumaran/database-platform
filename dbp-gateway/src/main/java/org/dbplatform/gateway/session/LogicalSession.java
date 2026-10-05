@@ -247,14 +247,15 @@ public final class LogicalSession {
 
     private SessionResolution refreshResolution() {
         try {
-            SessionResolution fresh = resolver.resolve(datasource, apiKey, applicationHint, user);
-            resolution = fresh;
-            return fresh;
-        } catch (AuthException e) {
+            SessionResolution fresh = resolver.refresh(resolution);
+            if (fresh != null) {
+                resolution = fresh;
+            }
+        } catch (RuntimeException e) {
             // keep serving with the last known resolution: a control plane hiccup must not break the data path
-            LOG.debug("re-resolution of {} failed ({}), keeping previous resolution", datasource, e.getMessage());
-            return resolution;
+            LOG.debug("re-resolution of {} failed ({}), keeping previous resolution", datasource, e.toString());
         }
+        return resolution;
     }
 
     private CredentialMaterial credentials(SessionResolution res) throws SQLException {

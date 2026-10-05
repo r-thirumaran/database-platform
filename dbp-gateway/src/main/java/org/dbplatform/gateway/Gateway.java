@@ -70,19 +70,19 @@ public final class Gateway implements AutoCloseable {
     /** Builds a gateway from the environment ({@code DBP_*}). */
     public static Gateway fromEnv() {
         GatewayConfig cfg = GatewayConfig.fromEnv();
-        return new Gateway(cfg, resolverFor(cfg));
-    }
-
-    static Resolver resolverFor(GatewayConfig cfg) {
         if (cfg.controlPlaneMode()) {
             ControlPlaneClient client = new ControlPlaneClient(cfg.controlPlaneUrl().orElseThrow(), cfg.serviceToken());
-            return new ControlPlaneResolver(client, Duration.ofSeconds(cfg.authCacheSeconds()),
-                    Duration.ofSeconds(cfg.configPollSeconds()));
+            return new Gateway(cfg, new ControlPlaneResolver(client, Duration.ofSeconds(cfg.authCacheSeconds()),
+                    Duration.ofSeconds(cfg.configPollSeconds())));
         }
         Path file = cfg.staticConfigFile().orElseThrow(() -> new IllegalStateException(
                 "either DBP_CONTROL_PLANE_URL (control plane mode) or DBP_GATEWAY_CONFIG (static YAML) must be set"));
         StaticConfig sc = StaticConfigLoader.load(file);
-        return new StaticResolver(sc);
+        if (sc.gatewayId() != null && !sc.gatewayId().isBlank()
+                && org.dbplatform.common.util.Env.lookup("DBP_GATEWAY_ID").isEmpty()) {
+            cfg = cfg.withGatewayId(sc.gatewayId()); // YAML gatewayId applies unless the environment overrides it
+        }
+        return new Gateway(cfg, new StaticResolver(sc));
     }
 
     private Runnable newHandler(java.net.Socket socket) {

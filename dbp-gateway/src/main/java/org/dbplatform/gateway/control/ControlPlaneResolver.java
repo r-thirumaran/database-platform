@@ -182,6 +182,31 @@ public final class ControlPlaneResolver implements Resolver {
         }
     }
 
+    @Override
+    public SessionResolution refresh(SessionResolution previous) {
+        String key = previous.datasource().name() + "|" + previous.identity().applicationId();
+        ResolveEntry cached = resolveCache.get(key);
+        if (cached != null && !cached.stale()) {
+            return cached.resolution();
+        }
+        try {
+            DatasourceResolution r = client.resolveDatasource(previous.datasource().name(), previous.identity().applicationId());
+            if (r == null || r.database() == null) {
+                return previous;
+            }
+            reachable = true;
+            ApplicationIdentity app = new ApplicationIdentity(previous.identity().applicationId(),
+                    previous.identity().application(), previous.identity().teamId(), previous.identity().team(), List.of());
+            SessionResolution res = toResolution(app, previous.datasource().name(), r);
+            resolveCache.put(key, new ResolveEntry(res, System.nanoTime()));
+            onConfigVersion(r.configVersion());
+            return res;
+        } catch (ControlPlaneException e) {
+            LOG.debug("refresh of {} failed ({}), keeping previous resolution", key, e.getMessage());
+            return previous;
+        }
+    }
+
     private ApplicationIdentity authenticate(String apiKey) throws AuthException {
         AuthEntry entry = authCache.get(apiKey);
         if (entry != null && !entry.expired()) {

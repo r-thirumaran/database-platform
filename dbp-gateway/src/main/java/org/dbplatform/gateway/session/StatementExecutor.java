@@ -144,6 +144,8 @@ public final class StatementExecutor {
                     hasResultSet = st.execute(sql);
                 }
                 session.noteWork();
+                // read generated keys now: some drivers (H2) discard them on getMoreResults()
+                byte[] generatedKeys = wantsKeys ? generatedKeysPayload(st) : null;
                 int fetch = fetchSize(opt.fetchSize());
                 int statementId = entry != null ? entry.id() : ProtocolConstants.DIRECT_STATEMENT_ID;
 
@@ -208,8 +210,8 @@ public final class StatementExecutor {
                 if (st instanceof CallableStatement cs && !req.outParams().isEmpty()) {
                     retained |= writeOutParams(cs, req.outParams(), owns, statementId, fetch);
                 }
-                if (wantsKeys) {
-                    writeGeneratedKeys(st);
+                if (generatedKeys != null) {
+                    out.writeFrame(MessageType.GENERATED_KEYS, generatedKeys);
                 }
                 warnings = collectWarnings(st);
             } finally {
@@ -356,16 +358,17 @@ public final class StatementExecutor {
         return v;
     }
 
-    private void writeGeneratedKeys(Statement st) throws IOException {
+    /** Materialises the GENERATED_KEYS payload (small by nature) or returns {@code null} when unavailable. */
+    private static byte[] generatedKeysPayload(Statement st) {
         ResultSet ks;
         try {
             ks = st.getGeneratedKeys();
         } catch (SQLException | UnsupportedOperationException e) {
             LOG.debug("getGeneratedKeys not available: {}", e.toString());
-            return;
+            return null;
         }
         if (ks == null) {
-            return;
+            return null;
         }
         try {
             ResultSetMetaData md = ks.getMetaData();
@@ -387,9 +390,10 @@ public final class StatementExecutor {
                 rows++;
             }
             po.putI32At(countPos, rows);
-            out.writeFrame(MessageType.GENERATED_KEYS, po.toByteArray());
+            return po.toByteArray();
         } catch (SQLException e) {
             LOG.debug("reading generated keys failed: {}", e.toString());
+            return null;
         } finally {
             closeQuietly(ks);
         }

@@ -24,6 +24,14 @@ public interface Resolver extends AutoCloseable {
      */
     SessionResolution resolve(String datasource, String apiKey, String applicationHint, String user) throws AuthException;
 
+    /**
+     * Cheap re-resolution at pin time so new pins pick up credential rotations: never re-authenticates, serves from
+     * the resolution cache and falls back to {@code previous} when nothing better is known.
+     */
+    default SessionResolution refresh(SessionResolution previous) {
+        return previous;
+    }
+
     /** Fetches the credential material (username, secret, version) for a resolved datasource. */
     CredentialMaterial credentials(ResolvedDatasource datasource) throws AuthException;
 

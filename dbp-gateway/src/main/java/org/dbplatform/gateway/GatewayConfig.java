@@ -92,6 +92,20 @@ public record GatewayConfig(
         return controlPlaneUrl.isPresent();
     }
 
+    public GatewayConfig withGatewayId(String id) {
+        return new GatewayConfig(id, port, adminPort, bindAddress, advertisedHost, idleTimeoutSeconds, maxFrameBytes,
+                rowsFrameSoftBytes, maxSessions, maxOpenCursorsPerSession, shutdownGraceSeconds, controlPlaneUrl,
+                serviceToken, staticConfigFile, authCacheSeconds, configPollSeconds, poolStatsSeconds, heartbeatSeconds,
+                tlsKeystore, tlsKeystorePassword);
+    }
+
+    public GatewayConfig withTls(Path keystore, String password) {
+        return new GatewayConfig(gatewayId, port, adminPort, bindAddress, advertisedHost, idleTimeoutSeconds, maxFrameBytes,
+                rowsFrameSoftBytes, maxSessions, maxOpenCursorsPerSession, shutdownGraceSeconds, controlPlaneUrl,
+                serviceToken, staticConfigFile, authCacheSeconds, configPollSeconds, poolStatsSeconds, heartbeatSeconds,
+                Optional.ofNullable(keystore), password == null ? "" : password);
+    }
+
     public GatewayConfig withPort(int p) {
         return new GatewayConfig(gatewayId, p, adminPort, bindAddress, advertisedHost, idleTimeoutSeconds, maxFrameBytes,
                 rowsFrameSoftBytes, maxSessions, maxOpenCursorsPerSession, shutdownGraceSeconds, controlPlaneUrl,
