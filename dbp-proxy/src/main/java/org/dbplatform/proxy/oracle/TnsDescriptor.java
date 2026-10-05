@@ -103,9 +103,13 @@ public final class TnsDescriptor {
         return serialize();
     }
 
+    /** Deeper descriptors are rejected instead of recursing (real ones are at most ~6 levels deep). */
+    static final int MAX_DEPTH = 32;
+
     private static final class Parser {
         private final String s;
         private int pos;
+        private int depth;
 
         Parser(String s) {
             this.s = s;
@@ -126,6 +130,17 @@ public final class TnsDescriptor {
         }
 
         TnsNode node() {
+            if (++depth > MAX_DEPTH) {
+                throw new TnsParseException("TNS descriptor nested deeper than " + MAX_DEPTH + " levels at offset " + pos);
+            }
+            try {
+                return nodeBody();
+            } finally {
+                depth--;
+            }
+        }
+
+        private TnsNode nodeBody() {
             expect('(');
             skipWs();
             int start = pos;
@@ -181,16 +196,25 @@ public final class TnsDescriptor {
                 node.setValue(v);
                 return node;
             }
+            // Unquoted scalar: runs to the ')' that closes this node. Balanced parentheses inside the value
+            // are part of it (OCI clients send e.g. (PROGRAM=C:\Program?Files?(x86)\app.exe) unquoted).
             int vs = pos;
-            while (!eof() && peek() != ')' && peek() != '(') {
+            int nested = 0;
+            while (!eof()) {
+                char ch = peek();
+                if (ch == '(') {
+                    nested++;
+                } else if (ch == ')') {
+                    if (nested == 0) {
+                        break;
+                    }
+                    nested--;
+                }
                 pos++;
             }
             String v = s.substring(vs, pos).strip();
             if (eof()) {
                 throw new TnsParseException("Unterminated value for '" + key + "'");
-            }
-            if (peek() == '(') {
-                throw new TnsParseException("Mixed scalar and nested value for '" + key + "' at offset " + pos);
             }
             expect(')');
             node.setValue(v);

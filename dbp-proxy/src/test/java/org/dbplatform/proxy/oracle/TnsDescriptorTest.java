@@ -45,6 +45,41 @@ class TnsDescriptorTest {
     }
 
     @Test
+    void unquotedValuesMayContainBalancedParentheses() {
+        // OCI clients send the executable path unquoted, with spaces replaced by '?' and parentheses kept
+        String oci = "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=proxy)(PORT=1521))"
+                + "(CONNECT_DATA=(SERVICE_NAME=sales.orders-service)(CID=(PROGRAM=C:\\Program?Files?(x86)\\Office\\EXCEL.EXE)(HOST=WS01)(USER=bob))))";
+        TnsDescriptor d = TnsDescriptor.parse(oci);
+        assertThat(d.serialize()).isEqualTo(oci);
+        assertThat(d.root().findValue("CONNECT_DATA", "CID", "PROGRAM")).isEqualTo("C:\\Program?Files?(x86)\\Office\\EXCEL.EXE");
+        TnsConnectString cs = TnsConnectString.parse(oci);
+        assertThat(cs.isDescriptor()).isTrue();
+        assertThat(cs.requestedService()).isEqualTo("sales.orders-service");
+        assertThat(cs.program()).isEqualTo("C:\\Program?Files?(x86)\\Office\\EXCEL.EXE");
+        assertThat(cs.rewrite("FREEPDB1", "oracle", 1522)).isEqualTo("(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=oracle)(PORT=1522))"
+                + "(CONNECT_DATA=(SERVICE_NAME=FREEPDB1)(CID=(PROGRAM=C:\\Program?Files?(x86)\\Office\\EXCEL.EXE)(HOST=WS01)(USER=bob))))");
+        // still rejected: an unbalanced ')' inside a value closes the node and leaves garbage behind
+        assertThatThrownBy(() -> TnsDescriptor.parse("(DESCRIPTION=(CONNECT_DATA=(PROGRAM=foo)bar)(HOST=h)))")).isInstanceOf(TnsParseException.class);
+    }
+
+    @Test
+    void rejectsPathologicalNestingWithoutStackOverflow() {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 20_000; i++) {
+            sb.append("(a=");
+        }
+        sb.append("x");
+        for (int i = 0; i < 20_000; i++) {
+            sb.append(")");
+        }
+        assertThatThrownBy(() -> TnsDescriptor.parse(sb.toString())).isInstanceOf(TnsParseException.class);
+        assertThat(TnsConnectString.parse(sb.toString()).isDescriptor()).isFalse();
+        // the real-world maximum (DESCRIPTION_LIST > DESCRIPTION > ADDRESS_LIST > ADDRESS > HOST) is far below the limit
+        assertThat(TnsDescriptor.parse("(DESCRIPTION_LIST=(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1)))(CONNECT_DATA=(CID=(PROGRAM=p)))))")
+                .findAny("PROGRAM").value()).isEqualTo("p");
+    }
+
+    @Test
     void rejectsMalformedInput() {
         assertThatThrownBy(() -> TnsDescriptor.parse("(DESCRIPTION=(A=1)")).isInstanceOf(TnsParseException.class);
         assertThatThrownBy(() -> TnsDescriptor.parse("DESCRIPTION")).isInstanceOf(TnsParseException.class);
