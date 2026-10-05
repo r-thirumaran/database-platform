@@ -6,6 +6,26 @@ parameter is given, in which case `{ "items": [...], "page": n, "size": n, "tota
 
 Errors: `{ "status": 404, "error": "NOT_FOUND", "message": "...", "path": "/api/v1/..." }`.
 
+
+Reference shapes used inside other documents:
+
+```
+TableRef      = { "id", "databaseId", "schema", "name", "kind" }
+RoutineRef    = { "id", "databaseId", "schema", "name", "kind" }
+DatasourceRef = { "id", "name", "state" }
+ConsumerEntry = { "application": Application, "team": Team, "kind": "READS|WRITES|CALLS",
+                  "source": "GATEWAY|PROXY_CORRELATION|COLLECTOR_SESSION|COLLECTOR_AUDIT|DECLARED",
+                  "confidence": 0.9, "confirmed": false, "queryCount": 1, "lastSeenAt": "…",
+                  "viaRoutine": RoutineRef | null }
+QueryStats    = { "count24h": 1, "count7d": 1, "lastSeenAt": "…", "avgDurationMs": 12.5, "errors24h": 0 }
+ConnectionStats = { "proxy": 12, "gatewayLogical": 40, "gatewayPhysical": 6 }
+```
+
+Simple mutation endpoints answer `{ "ok": true, ... }` with operation-specific counters:
+`POST /tables/bulk-ownership` → `{ "ok": true, "updated": 12 }`; `POST /import` → `{ "ok": true, "imported": { "teams": 2, "applications": 3, … } }`;
+`POST /seed/demo` → `{ "ok": true, "seeded": true }`; `POST /governance/evaluate` → `{ "ok": true, "violations": 3 }`;
+`POST /credentials/{id}/rotate` → the updated `Credential` (which carries `version`).
+
 Two kinds of callers:
 
 * **Operators / UI** — public endpoints below. Protected by the configured security mode
@@ -87,7 +107,7 @@ Identity rules are how **proxy** and **collectors** map observed connections to 
 { "id": "…", "name": "sales-oracle-app-user", "username": "SALES_APP",
   "provider": "INLINE | ENV | FILE | VAULT | GCP_SECRET_MANAGER | AWS_SECRETS_MANAGER",
   "ref": "SALES_ORACLE_PASSWORD",       // env var name, file path, vault path, secret resource name; null for INLINE
-  "rotatedAt": "…", "description": "…", "createdAt": "…", "updatedAt": "…" }
+  "version": 3, "rotatedAt": "…", "description": "…", "createdAt": "…", "updatedAt": "…" }
 ```
 * `GET /credentials`, `POST /credentials` (`{ …, "secret": "…" }` only for INLINE; stored encrypted with `DBP_MASTER_KEY`), `GET /credentials/{id}`, `PUT /credentials/{id}`, `DELETE /credentials/{id}`
 * `POST /credentials/{id}/rotate` `{ "secret": "…" }` (INLINE) or `{}` (re-read from provider) → bumps `rotatedAt` and `version`; gateways learn about it through `/internal/resolve` (`credentialVersion`) and drain old physical connections.
@@ -120,7 +140,7 @@ whose `applicationId` matches, else whose `tag` matches one of the application's
 
 * `GET /datasources`, `POST /datasources`, `GET /datasources/{id}`, `PUT /datasources/{id}`, `DELETE /datasources/{id}`
 * `PUT /datasources/{id}/routing-rules` (replace list), `POST /datasources/{id}/routing-rules`, `DELETE /datasources/{id}/routing-rules/{ruleId}`
-* `POST /datasources/{id}/switch` `{ "databaseId": "…" }` → sets `currentDatabaseId`, records a `MigrationEvent`
+* `POST /datasources/{id}/switch` `{ "databaseId": "…", "note": "optional" }` → sets `currentDatabaseId`, records a `MigrationEvent`
 * `GET /datasources/{id}/summary` → `{ datasource, ownerTeam, currentDatabase, targetDatabase, grants: [AccessGrant], consumers: [Application], pools: [PoolStats], tables: [TableRef] }`
 
 ## 6. Access grants (application ↔ datasource)
@@ -141,6 +161,7 @@ whose `applicationId` matches, else whose `tag` matches one of the application's
 { "id": "…", "databaseId": "…", "schema": "SALES", "name": "CUSTOMER", "kind": "TABLE | VIEW | MATERIALIZED_VIEW",
   "ownerTeamId": "…", "ownerConfirmed": true, "ownerSource": "DECLARED | INFERRED | NONE",
   "producerApplicationId": "…",
+  "discovered": false,                  // true when first seen in telemetry before any dictionary crawl
   "rowCountEstimate": 120000, "lastDdlAt": "…", "lastSeenAt": "…", "firstSeenAt": "…",
   "migration": { "targetDatabaseId": null, "targetSchema": null, "targetName": null, "state": "NOT_PLANNED | PLANNED | IN_PROGRESS | DONE" },
   "description": "…", "tags": [], "classification": "PII | CONFIDENTIAL | INTERNAL | PUBLIC | null" }
@@ -181,13 +202,13 @@ Endpoints:
 * `GET /tables/{id}/summary` →
   ```json
   { "table": {…}, "database": {…}, "ownerTeam": {…}, "producer": Application,
-    "consumers": [{ "application": {…}, "team": {…}, "kind": "READS|WRITES|CALLS", "queryCount": 1, "lastSeenAt": "…", "viaRoutine": RoutineRef }],
+    "consumers": [ConsumerEntry],
     "routines": [RoutineRef], "triggers": [RoutineRef], "foreignKeysOut": [TableRef], "foreignKeysIn": [TableRef],
     "views": [TableRef], "queryStats": QueryStats, "topQueries": [QueryStat] }
   ```
 * `POST /tables/{id}/ownership` `{ "teamId": "…", "confirmed": true }`
 * `POST /tables/bulk-ownership` `{ "databaseId": "…", "schema": "SALES", "teamId": "…" }` (assign owner to every table in a schema)
-* `GET /routines?databaseId=&schema=&kind=&q=`; `GET /routines/{id}`; `PUT /routines/{id}` (ownerTeamId, description, tags); `POST /routines/{id}/ownership` `{ "teamId": "…" }`; `GET /routines/{id}/summary` → `{ routine, dependencies: [Dependency with resolved names], callers: [Application], tables: [TableRef] }`
+* `GET /routines?databaseId=&schema=&kind=&q=`; `GET /routines/{id}`; `PUT /routines/{id}` (ownerTeamId, description, tags); `POST /routines/{id}/ownership` `{ "teamId": "…" }`; `GET /routines/{id}/summary` → `{ routine, dependencies: [Dependency + "fromName", "toName"], referencedBy: [Dependency + names], callers: [ConsumerEntry], tables: [TableRef] }`
 * `GET /dependencies?fromId=&toId=&kind=`; `POST /dependencies` (DECLARED); `DELETE /dependencies/{id}` (DECLARED only)
 * `GET /relationships?applicationId=&objectId=&kind=&source=`; `POST /relationships` (DECLARED); `PUT /relationships/{id}` (`confirmed`); `DELETE /relationships/{id}`
 
@@ -203,14 +224,18 @@ Endpoints:
                 "attrs": { "queryCount": 120, "lastSeenAt": "…", "source": "GATEWAY", "confirmed": false } }],
     "truncated": false }
   ```
-  Node id format is `<type>:<refId>` with lowercase type.
+  Node id format is `<type>:<refId>` with lowercase type. Edge directions: `team OWNS table/routine/datasource`,
+  `application BELONGS_TO team`, `application READS/WRITES table`, `application CALLS routine`, `routine REFERENCES/READS/WRITES table`,
+  `table TRIGGERS routine`, `table FOREIGN_KEY table`, `database HOSTS table/routine`, `datasource HOSTS` is not used (datasource `ROUTES_TO` database),
+  `datasource/table MIGRATES_TO database/table`. Indirect relationships (`viaRoutineId` set) are omitted unless `includeIndirect=true`
+  (the routine path already shows them).
 
 * `GET /impact/table/{id}` and `GET /impact/column/{columnId}` →
   ```json
   { "target": { "type": "TABLE", "id": "…", "label": "SALES.CUSTOMER" },
     "owner": Team, "producer": Application,
-    "directConsumers": [{ "application": {…}, "team": {…}, "kind": "READS", "queryCount": 1, "lastSeenAt": "…" }],
-    "indirectConsumers": [{ "application": {…}, "team": {…}, "viaRoutine": RoutineRef, "kind": "WRITES" }],
+    "directConsumers": [ConsumerEntry],
+    "indirectConsumers": [ConsumerEntry],   // viaRoutine set
     "routines": [RoutineRef], "triggers": [RoutineRef], "dependentViews": [TableRef],
     "foreignKeyDependents": [TableRef],
     "teamsAffected": [Team], "queryStats": { "count24h": 1, "count7d": 1, "lastSeenAt": "…" },
@@ -218,7 +243,16 @@ Endpoints:
   ```
   Column impact additionally lists `queriesReferencingColumn` (from normalized SQL when available).
 
-* `GET /impact/datasource/{id}` → consumers of every table currently routed through the datasource (used before a migration switch).
+* `GET /impact/datasource/{id}` → used before a migration switch:
+  ```json
+  { "target": { "type": "DATASOURCE", "id": "…", "label": "sales" },
+    "datasource": Datasource, "currentDatabase": Database, "targetDatabase": Database,
+    "applications": [{ "application": Application, "team": Team, "hasRoutingRule": false, "queryCount": 1, "lastSeenAt": "…" }],
+    "teamsAffected": [Team],
+    "tables": [{ "table": TableRef, "consumers": [ConsumerEntry], "queryCount": 1 }],
+    "routines": [RoutineRef], "triggers": [RoutineRef],
+    "riskScore": 0.5, "riskFactors": ["engine change ORACLE → POSTGRES", "3 consuming teams"] }
+  ```
 
 ## 9. Telemetry ingestion (internal)
 
@@ -274,7 +308,7 @@ Ingestion is idempotent on `eventId`. The control plane:
     "queriesLastHour": 48211, "unownedTables": 120, "crossTeamAccesses": 44, "violations": 3,
     "componentsOnline": [{ "componentType": "GATEWAY", "componentId": "gw-1", "lastHeartbeat": "…", "healthy": true }] }
   ```
-* `GET /stats/connections?groupBy=application|database|datasource|team` → `[{ "key": "orders-service", "proxy": 12, "gatewayLogical": 40, "gatewayPhysical": 6 }]`
+* `GET /stats/connections?groupBy=application|database|datasource|team` → `[{ "key": "orders-service", "proxy": 12, "gatewayLogical": 40, "gatewayPhysical": 6 }]` (unattributed connections use key `"unknown"`)
 * `GET /stats/queries/top?by=count|duration|rows&window=1h|24h|7d&databaseId=&applicationId=&limit=50` → `[QueryStat]`
   `QueryStat = { "sqlHash", "sqlNormalized", "operation", "applicationId", "applicationName", "databaseId", "tables": [TableRef], "count", "avgDurationMs", "p95DurationMs", "maxDurationMs", "rows", "errors", "lastSeenAt" }`
 * `GET /stats/tables/hot?window=24h&limit=50` → `[{ "table": TableRef, "reads", "writes", "applications": 5, "teams": 3 }]`
@@ -284,7 +318,7 @@ Ingestion is idempotent on `eventId`. The control plane:
   `[{ "source": "PROXY|COLLECTOR", "application", "team", "datasource", "database", "engine", "clientAddr", "program", "machine", "osUser", "dbUser", "status", "openedAt", "durationSeconds", "sqlId", "currentSql" }]`
 * `GET /migration-events?datasourceId=` → `[{ "id", "datasourceId", "fromDatabaseId", "toDatabaseId", "at", "by", "note" }]`
 * Governance:
-  * `GET /governance/policies` → `[{ "id", "kind": "CROSS_TEAM_DIRECT_ACCESS | UNOWNED_TABLE | UNDECLARED_CONSUMER | WRITE_BY_NON_PRODUCER | DIRECT_DB_ACCESS_BYPASSING_PLATFORM", "enabled": true, "severity": "LOW|MEDIUM|HIGH" }]`, `PUT /governance/policies/{id}`
+  * `GET /governance/policies` → `[{ "id", "description", "kind": "CROSS_TEAM_DIRECT_ACCESS | UNOWNED_TABLE | UNDECLARED_CONSUMER | WRITE_BY_NON_PRODUCER | DIRECT_DB_ACCESS_BYPASSING_PLATFORM", "enabled": true, "severity": "LOW|MEDIUM|HIGH" }]`, `PUT /governance/policies/{id}`
   * `GET /governance/violations?status=OPEN|ACKNOWLEDGED|RESOLVED` → `[{ "id", "policyKind", "severity", "applicationId", "teamId", "objectType", "objectId", "label", "detail", "firstSeenAt", "lastSeenAt", "status" }]`, `PUT /governance/violations/{id}` (`status`)
   * Violations are recomputed by a scheduled job (`DBP_GOVERNANCE_INTERVAL_SECONDS`, default 300) and on `POST /governance/evaluate`.
 
