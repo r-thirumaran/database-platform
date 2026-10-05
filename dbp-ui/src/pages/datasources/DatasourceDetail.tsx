@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ArrowRight, ArrowLeftRight, Pencil, Plus, Trash2 } from 'lucide-react';
 import {
-  useAccessGrantMutations, useApplications, useDatabases, useDatasourceMutations, useDatasourceSummary, useMigrationEvents,
+  useAccessGrantMutations, useApplications, useDatabases, useDatasourceMutations, useDatasources, useDatasourceSummary, useMigrationEvents,
 } from '../../api/hooks';
 import type { AccessGrant, AccessGrantInput, Datasource, DatasourceSummary, PoolMode, PoolPolicy, RoutingRule, RoutingRuleInput } from '../../api/types';
 import { PageHeader } from '../../components/PageHeader';
@@ -269,7 +269,7 @@ function GrantsCard({ ds, grants, appName, className }: { ds: Datasource; grants
 
 export function GrantDialog({ datasourceId, applicationId, grant, onSave, onClose, busy }: { datasourceId?: string; applicationId?: string; grant: AccessGrant | null; onSave: (g: AccessGrantInput) => void; onClose: () => void; busy: boolean }) {
   const apps = useApplications();
-  const dss = useDatasourcesList();
+  const dss = useDatasources();
   const [g, setG] = useState<AccessGrantInput>(grant ?? { applicationId: applicationId ?? '', datasourceId: datasourceId ?? '', maxLogicalConnections: 20, maxProxyConnections: 0, poolModeOverride: null, readOnly: false, enabled: true, note: '' });
   return (
     <Modal open title={grant ? 'Edit access grant' : 'Grant access'} onClose={onClose}>
@@ -289,6 +289,3 @@ export function GrantDialog({ datasourceId, applicationId, grant, onSave, onClos
     </Modal>
   );
 }
-
-// small indirection so GrantDialog can be reused from the application page without importing the list hook twice
-import { useDatasources as useDatasourcesList } from '../../api/hooks';

@@ -77,11 +77,12 @@ public class SummaryService {
                                      List<RoutineRef> calls, StatsService.ConnectionStats connections, StatsService.QueryStats queryStats) {}
 
     public record DatasourceSummary(Datasource datasource, Team ownerTeam, DatabaseInstance currentDatabase, DatabaseInstance targetDatabase,
-                                    List<AccessGrant> grants, List<Application> consumers, List<PoolStatsSnapshot> pools, List<TableRef> tables) {}
+                                    List<AccessGrant> grants, List<Application> consumers, List<PoolStatsSnapshot> pools, List<TableRef> tables,
+                                    List<String> warnings) {}
 
     public record TableSummary(DbTable table, DatabaseInstance database, Team ownerTeam, Application producer, List<Consumer> consumers,
                                List<RoutineRef> routines, List<RoutineRef> triggers, List<TableRef> foreignKeysOut, List<TableRef> foreignKeysIn,
-                               List<RoutineRef> views, StatsService.QueryStats queryStats, List<StatsService.QueryStatView> topQueries) {}
+                               List<TableRef> views, StatsService.QueryStats queryStats, List<StatsService.QueryStatView> topQueries) {}
 
     public record ResolvedDependency(String id, ObjectType fromType, String fromId, String fromLabel, ObjectType toType, String toId, String toLabel,
                                      DependencyKind kind, Enums.DependencySource source, double confidence, Instant firstSeenAt, Instant lastSeenAt) {}
@@ -133,7 +134,33 @@ public class SummaryService {
         consumers.sort(Comparator.comparing(Application::getName));
         List<PoolStatsSnapshot> pools = stats.pools().stream().filter(p -> id.equals(p.getDatasourceId()) || ds.getName().equals(p.getDatasourceName())).toList();
         List<TableRef> tbls = cur == null ? List.of() : tables.findByDatabaseIdOrderBySchemaAscNameAsc(cur.getId()).stream().map(TableRef::of).toList();
-        return new DatasourceSummary(ds, owner, cur, tgt, gs, consumers, pools, tbls);
+        return new DatasourceSummary(ds, owner, cur, tgt, gs, consumers, pools, tbls, capacityWarnings(ds, cur));
+    }
+
+    /**
+     * {@code poolPolicy.maxConnections} bounds one gateway instance; {@code Database.maxPhysicalConnections}
+     * is the whole-database budget. The sum over all datasources routed to the database × the number of
+     * gateway instances seen (at least 1) is compared with the budget: warn, never reject.
+     */
+    public List<String> capacityWarnings(Datasource ds, DatabaseInstance db) {
+        List<String> warnings = new ArrayList<>();
+        if (db == null || db.getMaxPhysicalConnections() == null) return warnings;
+        int gateways = Math.max(1, (int) stats.gatewayInstances());
+        int sum = 0;
+        List<String> contributors = new ArrayList<>();
+        for (Datasource other : datasources.findAll()) {
+            boolean routed = db.getId().equals(other.getCurrentDatabaseId()) || db.getId().equals(other.getTargetDatabaseId())
+                    || other.getRoutingRules().stream().anyMatch(r -> db.getId().equals(r.getDatabaseId()));
+            if (!routed) continue;
+            sum += other.getPoolPolicy().getMaxConnections();
+            contributors.add(other.getName() + "=" + other.getPoolPolicy().getMaxConnections());
+        }
+        int expected = sum * gateways;
+        if (expected > db.getMaxPhysicalConnections()) {
+            warnings.add("Pool budget exceeds database '" + db.getName() + "': " + sum + " pooled connections per gateway (" + String.join(", ", contributors)
+                    + ") x " + gateways + " gateway instance(s) = " + expected + " > maxPhysicalConnections " + db.getMaxPhysicalConnections());
+        }
+        return warnings;
     }
 
     public TableSummary table(String id) {
@@ -142,18 +169,20 @@ public class SummaryService {
         Team owner = t.getOwnerTeamId() == null ? null : teams.findById(t.getOwnerTeamId()).orElse(null);
         Application producer = t.getProducerApplicationId() == null ? null : applications.findById(t.getProducerApplicationId()).orElse(null);
         List<Consumer> consumers = consumersOf(id);
-        List<RoutineRef> routs = new ArrayList<>(), trigs = new ArrayList<>(), views = new ArrayList<>();
-        List<TableRef> fkOut = new ArrayList<>(), fkIn = new ArrayList<>();
+        List<RoutineRef> routs = new ArrayList<>(), trigs = new ArrayList<>();
+        List<TableRef> views = new ArrayList<>(), fkOut = new ArrayList<>(), fkIn = new ArrayList<>();
         for (Dependency d : dependencies.findByToId(id)) {
             if (d.getFromType() == ObjectType.ROUTINE) {
                 routines.findById(d.getFromId()).ifPresent(r -> {
                     RoutineRef ref = RoutineRef.of(r);
-                    if (r.getKind() == Enums.RoutineKind.VIEW) { if (!views.contains(ref)) views.add(ref); }
-                    else if (r.getKind() == Enums.RoutineKind.TRIGGER) { if (!trigs.contains(ref)) trigs.add(ref); }
+                    if (r.getKind() == Enums.RoutineKind.TRIGGER) { if (!trigs.contains(ref)) trigs.add(ref); }
                     else if (!routs.contains(ref)) routs.add(ref);
                 });
             } else if (d.getKind() == DependencyKind.FOREIGN_KEY) {
                 tables.findById(d.getFromId()).ifPresent(x -> fkIn.add(TableRef.of(x)));
+            } else {
+                // a view (Table.kind = VIEW) referencing this table
+                tables.findById(d.getFromId()).ifPresent(x -> { TableRef ref = TableRef.of(x); if (x.getKind() != Enums.TableKind.TABLE && !views.contains(ref)) views.add(ref); });
             }
         }
         for (Dependency d : dependencies.findByFromId(id)) {

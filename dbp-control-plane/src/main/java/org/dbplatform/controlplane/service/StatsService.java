@@ -103,6 +103,11 @@ public class StatsService {
                 tables.countByOwnerTeamIdIsNull(), crossTeam, violations.countByStatus(Enums.ViolationStatus.OPEN), online);
     }
 
+    /** Number of healthy gateway instances known from heartbeats. */
+    public long gatewayInstances() {
+        return components.list().stream().filter(c -> c.componentType() == Enums.ComponentType.GATEWAY && c.healthy()).count();
+    }
+
     public ConnectionStats connectionTotals() {
         int proxy = live.proxyRows().size();
         int logical = 0, physical = 0;

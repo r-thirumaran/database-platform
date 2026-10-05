@@ -2,6 +2,7 @@ package org.dbplatform.common.sql;
 
 import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.Function;
+import net.sf.jsqlparser.parser.CCJSqlParser;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
@@ -206,22 +207,32 @@ public final class SqlAnalyzer {
         boolean brackets = engine == Engine.MSSQL || engine == Engine.H2;
         boolean batch = scrubbed.indexOf(';') >= 0 && scrubbed.indexOf(';') < scrubbed.length() - 1;
         try {
-            if (batch) {
-                Statements all = CCJSqlParserUtil.parseStatements(prepared, p -> p
-                        .withSquareBracketQuotation(brackets)
-                        .withAllowComplexParsing(complexParsing)
-                        .withBackslashEscapeCharacter(false));
-                return all == null ? List.of() : all.stream().filter(java.util.Objects::nonNull).toList();
-            }
-            Statement single = CCJSqlParserUtil.parse(prepared, p -> p
+            // The parser is driven directly: CCJSqlParserUtil.parse() adds executor/timeout machinery that
+            // costs ~5x the parse itself. Complex (backtracking) parsing is a second attempt, if enabled.
+            CCJSqlParser parser = CCJSqlParserUtil.newParser(prepared)
                     .withSquareBracketQuotation(brackets)
-                    .withAllowComplexParsing(complexParsing)
-                    .withBackslashEscapeCharacter(false));
-            return single == null ? List.of() : List.of(single);
-        } catch (Throwable t) { // JSQLParserException, TokenMgrError, StackOverflowError, ...
+                    .withAllowComplexParsing(false)
+                    .withBackslashEscapeCharacter(false);
+            try {
+                return batch ? statementsOf(parser.Statements()) : List.of(parser.Statement());
+            } catch (Throwable first) {
+                if (!complexParsing) {
+                    throw first;
+                }
+                CCJSqlParser retry = CCJSqlParserUtil.newParser(prepared)
+                        .withSquareBracketQuotation(brackets)
+                        .withAllowComplexParsing(true)
+                        .withBackslashEscapeCharacter(false);
+                return batch ? statementsOf(retry.Statements()) : List.of(retry.Statement());
+            }
+        } catch (Throwable t) { // ParseException, TokenMgrError, StackOverflowError, ...
             LOG.trace("JSqlParser rejected statement: {}", t.toString());
             return List.of();
         }
+    }
+
+    private static List<Statement> statementsOf(Statements all) {
+        return all == null ? List.of() : all.stream().filter(java.util.Objects::nonNull).toList();
     }
 
     /** Engine-specific rewrites that make statements acceptable to JSqlParser without changing their meaning for us. */

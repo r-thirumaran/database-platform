@@ -45,9 +45,9 @@ import org.springframework.transaction.annotation.Transactional;
 public class ImpactService {
     public record Target(String type, String id, String label) {}
     public record DirectConsumer(Application application, Team team, Enums.RelationshipKind kind, long queryCount, Instant lastSeenAt, boolean confirmed) {}
-    public record IndirectConsumer(Application application, Team team, RoutineRef viaRoutine, Enums.RelationshipKind kind, long queryCount, Instant lastSeenAt) {}
+    public record IndirectConsumer(Application application, Team team, RoutineRef viaRoutine, TableRef viaView, Enums.RelationshipKind kind, long queryCount, Instant lastSeenAt) {}
     public record Impact(Target target, Team owner, Application producer, List<DirectConsumer> directConsumers, List<IndirectConsumer> indirectConsumers,
-                         List<RoutineRef> routines, List<RoutineRef> triggers, List<RoutineRef> dependentViews, List<TableRef> foreignKeyDependents,
+                         List<RoutineRef> routines, List<RoutineRef> triggers, List<TableRef> dependentViews, List<TableRef> foreignKeyDependents,
                          List<Team> teamsAffected, StatsService.QueryStats queryStats, double riskScore, List<String> riskFactors,
                          DbColumn column, List<StatsService.QueryStatView> queriesReferencingColumn) {}
     public record DatasourceImpact(Target target, Datasource datasource, DatabaseInstance currentDatabase, DatabaseInstance targetDatabase,
@@ -101,21 +101,48 @@ public class ImpactService {
                 direct.merge(k, new DirectConsumer(c.application(), c.team(), c.kind(), c.queryCount(), c.lastSeenAt(), c.confirmed()),
                         (a, b) -> new DirectConsumer(a.application(), a.team(), a.kind(), a.queryCount() + b.queryCount(), later(a.lastSeenAt(), b.lastSeenAt()), a.confirmed() || b.confirmed()));
             } else {
-                indirect.put(c.application().getId() + "|" + c.kind() + "|" + c.viaRoutine().id(), new IndirectConsumer(c.application(), c.team(), c.viaRoutine(), c.kind(), c.queryCount(), c.lastSeenAt()));
+                indirect.put(c.application().getId() + "|" + c.kind() + "|" + c.viaRoutine().id(), new IndirectConsumer(c.application(), c.team(), c.viaRoutine(), null, c.kind(), c.queryCount(), c.lastSeenAt()));
             }
         }
         // 2. routines / triggers referencing the table, then the applications calling them
-        List<RoutineRef> routs = new ArrayList<>(), trigs = new ArrayList<>(), views = new ArrayList<>();
+        List<RoutineRef> routs = new ArrayList<>(), trigs = new ArrayList<>();
+        List<TableRef> views = new ArrayList<>();
         Set<String> routineIds = new LinkedHashSet<>();
+        Set<String> viewIds = new LinkedHashSet<>();
         for (Dependency d : dependencies.findByToId(t.getId())) {
-            if (d.getFromType() != ObjectType.ROUTINE) continue;
+            if (d.getFromType() == ObjectType.TABLE) {
+                if (d.getKind() == DependencyKind.FOREIGN_KEY) continue;
+                tables.findById(d.getFromId()).ifPresent(v -> { if (v.getKind() != Enums.TableKind.TABLE && viewIds.add(v.getId())) views.add(TableRef.of(v)); });
+                continue;
+            }
             routines.findById(d.getFromId()).ifPresent(r -> {
                 routineIds.add(r.getId());
                 RoutineRef ref = RoutineRef.of(r);
-                if (r.getKind() == Enums.RoutineKind.VIEW) { if (!views.contains(ref)) views.add(ref); }
-                else if (r.getKind() == Enums.RoutineKind.TRIGGER) { if (!trigs.contains(ref)) trigs.add(ref); }
+                if (r.getKind() == Enums.RoutineKind.TRIGGER) { if (!trigs.contains(ref)) trigs.add(ref); }
                 else if (!routs.contains(ref)) routs.add(ref);
             });
+        }
+        // 3. views built on it (transitively) and the consumers of those views
+        List<String> viewFrontier = new ArrayList<>(viewIds);
+        while (!viewFrontier.isEmpty()) {
+            List<String> next = new ArrayList<>();
+            for (Dependency d : dependencies.findByToIdIn(viewFrontier)) {
+                if (d.getFromType() == ObjectType.TABLE && d.getKind() != DependencyKind.FOREIGN_KEY) {
+                    tables.findById(d.getFromId()).ifPresent(v -> { if (v.getKind() != Enums.TableKind.TABLE && viewIds.add(v.getId())) { views.add(TableRef.of(v)); next.add(v.getId()); } });
+                }
+            }
+            viewFrontier = next;
+        }
+        for (String vid : viewIds) {
+            DbTable v = tables.findById(vid).orElse(null);
+            if (v == null) continue;
+            for (Relationship rel : relationships.findByObjectId(vid)) {
+                Application app = appCache.computeIfAbsent(rel.getApplicationId(), k -> applications.findById(k).orElse(null));
+                if (app == null) continue;
+                Team team = app.getTeamId() == null ? null : teamCache.computeIfAbsent(app.getTeamId(), k -> teams.findById(k).orElse(null));
+                String k = app.getId() + "|READS|view:" + vid;
+                if (!indirect.containsKey(k)) indirect.put(k, new IndirectConsumer(app, team, null, TableRef.of(v), Enums.RelationshipKind.READS, rel.getQueryCount(), rel.getLastSeenAt()));
+            }
         }
         for (Dependency d : dependencies.findByFromId(t.getId())) {
             if (d.getKind() == DependencyKind.TRIGGERS) routines.findById(d.getToId()).ifPresent(r -> { routineIds.add(r.getId()); RoutineRef ref = RoutineRef.of(r); if (!trigs.contains(ref)) trigs.add(ref); });
@@ -138,10 +165,9 @@ public class ImpactService {
                 Application app = appCache.computeIfAbsent(rel.getApplicationId(), k -> applications.findById(k).orElse(null));
                 if (app == null) continue;
                 Team team = app.getTeamId() == null ? null : teamCache.computeIfAbsent(app.getTeamId(), k -> teams.findById(k).orElse(null));
-                Enums.RelationshipKind kind = r.getKind() == Enums.RoutineKind.VIEW ? Enums.RelationshipKind.READS
-                        : catalogue.expandRoutineToTables(rid).getOrDefault(t.getId(), Enums.RelationshipKind.READS);
+                Enums.RelationshipKind kind = catalogue.expandRoutineToTables(rid).getOrDefault(t.getId(), Enums.RelationshipKind.READS);
                 String k = app.getId() + "|" + kind + "|" + rid;
-                if (!indirect.containsKey(k)) indirect.put(k, new IndirectConsumer(app, team, RoutineRef.of(r), kind, rel.getQueryCount(), rel.getLastSeenAt()));
+                if (!indirect.containsKey(k)) indirect.put(k, new IndirectConsumer(app, team, RoutineRef.of(r), null, kind, rel.getQueryCount(), rel.getLastSeenAt()));
             }
         }
         // 4. foreign keys pointing at it

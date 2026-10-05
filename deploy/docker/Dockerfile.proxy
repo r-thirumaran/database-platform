@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+# Proxy image (plain Java 21, fat jar dbp-proxy-<ver>-all.jar). Build context is the repository root:
+#   docker build -f deploy/docker/Dockerfile.proxy -t dbp/proxy .
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/root/.m2 \
+    mvn -q -B -pl dbp-proxy -am -DskipTests package \
+ && ls dbp-proxy/target/dbp-proxy-*-all.jar
+
+FROM eclipse-temurin:21-jre
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin dbp
+WORKDIR /app
+COPY --from=build --chown=dbp:dbp /src/dbp-proxy/target/dbp-proxy-*-all.jar /app/app.jar
+USER dbp
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError -Djava.security.egd=file:/dev/./urandom"
+# 1521 Oracle TNS listener, 5432 PostgreSQL listener, 1433 SQL Server listener, 7431 admin (/health, /metrics, /connections)
+EXPOSE 1521 5432 1433 7431
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=6 \
+    CMD curl -fsS http://localhost:7431/health || exit 1
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

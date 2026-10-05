@@ -1,0 +1,370 @@
+# Database Access Platform - demo stack
+#
+#   cp .env.example .env            # set ORACLE_PASSWORD at least
+#   docker compose --profile core --profile examples up -d
+#   docker compose --profile monitoring up -d
+#   docker compose --profile batch run --rm reporting-batch
+#
+# Profiles
+#   core        oracle, postgres, control-plane, gateway, proxy, bootstrap
+#   examples    orders-service x3 (direct / proxy / gateway), legacy-reporting
+#   monitoring  prometheus, grafana
+#   batch       reporting-batch (one-shot, run on demand)
+#
+# Host ports: 1521 and 5432 belong to the PROXY; the databases themselves are on 1522 / 5433.
+name: dbp
+
+x-build-context: &build-context
+  context: ..
+
+x-platform-env: &platform-env
+  DBP_CONTROL_PLANE_URL: http://control-plane:8080
+  DBP_SERVICE_TOKEN: ${DBP_SERVICE_TOKEN:-dev-service-token}
+  DBP_TELEMETRY_FLUSH_MS: "2000"
+
+services:
+  # ===========================================================================================
+  # Databases
+  # ===========================================================================================
+  oracle:
+    image: gvenzl/oracle-free:23-slim
+    container_name: dbp-oracle
+    profiles: ["core"]
+    environment:
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:?Set ORACLE_PASSWORD in deploy/.env}
+      # read by demo/sql/oracle/02_passwords.sh
+      SALES_PASSWORD: "${SALES_PASSWORD:-Sales#Demo2026}"
+      SALES_APP_PASSWORD: "${SALES_APP_PASSWORD:-SalesApp#Demo2026}"
+      DBP_COLLECTOR_PASSWORD: "${DBP_COLLECTOR_PASSWORD:-Collector#Demo2026}"
+    ports:
+      - "${ORACLE_HOST_PORT:-1522}:1521"
+    volumes:
+      - ../demo/sql/oracle:/container-entrypoint-initdb.d:ro
+      - oracle-data:/opt/oracle/oradata
+    healthcheck:
+      # provided by the image; the init scripts run after the database opens, allow for that
+      test: ["CMD", "healthcheck.sh"]
+      interval: 20s
+      timeout: 15s
+      retries: 30
+      start_period: 180s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17
+    container_name: dbp-postgres
+    profiles: ["core"]
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - track_activity_query_size=4096
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      # read by demo/sql/postgres/05_passwords.sh
+      DBP_DB_PASSWORD: ${DBP_DB_PASSWORD:-dbp}
+      SALES_PASSWORD: "${SALES_PASSWORD:-Sales#Demo2026}"
+      SALES_APP_PASSWORD: "${SALES_APP_PASSWORD:-SalesApp#Demo2026}"
+      DBP_COLLECTOR_PASSWORD: "${DBP_COLLECTOR_PASSWORD:-Collector#Demo2026}"
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - ../demo/sql/postgres:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1 forces TCP: the temporary server used during init only listens on the socket
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d dbp"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 20s
+    restart: unless-stopped
+
+  # ===========================================================================================
+  # Platform
+  # ===========================================================================================
+  control-plane:
+    build:
+      <<: *build-context
+      dockerfile: deploy/docker/Dockerfile.control-plane
+    image: ${DBP_IMAGE_PREFIX:-dbp}/control-plane:${DBP_VERSION:-0.1.0-SNAPSHOT}
+    container_name: dbp-control-plane
+    profiles: ["core"]
+    environment:
+      SPRING_PROFILES_ACTIVE: postgres
+      DBP_DB_URL: jdbc:postgresql://postgres:5432/dbp
+      DBP_DB_USER: dbp
+      DBP_DB_PASSWORD: ${DBP_DB_PASSWORD:-dbp}
+      DBP_SERVICE_TOKEN: ${DBP_SERVICE_TOKEN:-dev-service-token}
+      DBP_MASTER_KEY: ${DBP_MASTER_KEY:?Set DBP_MASTER_KEY in deploy/.env}
+      DBP_SECURITY_MODE: ${DBP_SECURITY_MODE:-none}
+      DBP_DEMO_SEED_ENABLED: ${DBP_DEMO_SEED_ENABLED:-false}
+      DBP_TELEMETRY_RETENTION_HOURS: ${DBP_TELEMETRY_RETENTION_HOURS:-72}
+      # Credential provider ENV: bootstrap/platform-config.json references these variable names
+      SALES_APP_PASSWORD: "${SALES_APP_PASSWORD:-SalesApp#Demo2026}"
+      DBP_COLLECTOR_PASSWORD: "${DBP_COLLECTOR_PASSWORD:-Collector#Demo2026}"
+    ports:
+      - "${CONTROL_PLANE_HOST_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    restart: unless-stopped
+
+  gateway:
+    build:
+      <<: *build-context
+      dockerfile: deploy/docker/Dockerfile.gateway
+    image: ${DBP_IMAGE_PREFIX:-dbp}/gateway:${DBP_VERSION:-0.1.0-SNAPSHOT}
+    container_name: dbp-gateway
+    profiles: ["core"]
+    environment:
+      <<: *platform-env
+      DBP_GATEWAY_ID: gw-1
+      DBP_GATEWAY_PORT: "7420"
+      DBP_GATEWAY_ADMIN_PORT: "7421"
+    ports:
+      - "${GATEWAY_HOST_PORT:-7420}:7420"
+      - "${GATEWAY_ADMIN_HOST_PORT:-7421}:7421"
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:7421/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  proxy:
+    build:
+      <<: *build-context
+      dockerfile: deploy/docker/Dockerfile.proxy
+    image: ${DBP_IMAGE_PREFIX:-dbp}/proxy:${DBP_VERSION:-0.1.0-SNAPSHOT}
+    container_name: dbp-proxy
+    profiles: ["core"]
+    environment:
+      <<: *platform-env
+      DBP_PROXY_ID: proxy-1
+      DBP_PROXY_ADMIN_PORT: "7431"
+    ports:
+      # the proxy owns the "real" database ports on the host; applications on the host use
+      # jdbc:oracle:thin:@//localhost:1521/sales.<app> and jdbc:postgresql://localhost:5432/sales.<app>
+      - "${PROXY_ORACLE_HOST_PORT:-1521}:1521"
+      - "${PROXY_POSTGRES_HOST_PORT:-5432}:5432"
+      - "${PROXY_ADMIN_HOST_PORT:-7431}:7431"
+      # - "1433:1433"   # SQL Server listener, no backend in the demo (see demo/sql/mssql)
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:7431/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # One-shot: imports bootstrap/platform-config.json, creates API keys for the example applications
+  # and writes them to ./.generated/examples.env (consumed by the gateway-mode examples), then exits.
+  bootstrap:
+    image: curlimages/curl:8.11.1
+    container_name: dbp-bootstrap
+    profiles: ["core"]
+    user: "0:0"   # the bind-mounted ./.generated directory must be writable
+    environment:
+      DBP_CONTROL_PLANE_URL: http://control-plane:8080
+      DBP_SERVICE_TOKEN: ${DBP_SERVICE_TOKEN:-dev-service-token}
+      DBP_BOOTSTRAP_CONFIG: /bootstrap/platform-config.json
+      DBP_GENERATED_DIR: /generated
+      DBP_BOOTSTRAP_APPS: orders-service reporting-batch
+      DBP_BOOTSTRAP_FORCE: ${DBP_BOOTSTRAP_FORCE:-false}
+      DBP_BOOTSTRAP_WAIT_SECONDS: "300"
+    volumes:
+      - ./bootstrap:/bootstrap:ro
+      - ./.generated:/generated
+    entrypoint: ["/bin/sh", "/bootstrap/bootstrap.sh"]
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    restart: "no"
+
+  # ===========================================================================================
+  # Example applications (profile "examples")
+  # ===========================================================================================
+  orders-service-direct:
+    build:
+      <<: *build-context
+      dockerfile: dbp-examples/orders-service/Dockerfile
+    image: ${DBP_IMAGE_PREFIX:-dbp}/orders-service:${DBP_VERSION:-0.1.0-SNAPSHOT}
+    container_name: dbp-orders-direct
+    profiles: ["examples"]
+    environment:
+      SPRING_PROFILES_ACTIVE: direct
+      ORACLE_HOST: oracle
+      ORACLE_PORT: "1521"
+      ORACLE_SERVICE: FREEPDB1
+      SALES_APP_PASSWORD: "${SALES_APP_PASSWORD:-SalesApp#Demo2026}"
+      ORDERS_POOL_SIZE: ${ORDERS_POOL_SIZE:-10}
+    ports:
+      - "${ORDERS_DIRECT_HOST_PORT:-8091}:8080"
+    depends_on:
+      oracle:
+        condition: service_healthy
+    restart: unless-stopped
+
+  orders-service-proxy:
+    image: ${DBP_IMAGE_PREFIX:-dbp}/orders-service:${DBP_VERSION:-0.1.0-SNAPSHOT}
+    container_name: dbp-orders-proxy
+    profiles: ["examples"]
+    environment:
+      SPRING_PROFILES_ACTIVE: proxy
+      PROXY_HOST: proxy
+      PROXY_PORT: "1521"
+      PROXY_SERVICE: sales.orders-service
+      SALES_APP_PASSWORD: "${SALES_APP_PASSWORD:-SalesApp#Demo2026}"
+      ORDERS_POOL_SIZE: ${ORDERS_POOL_SIZE:-10}
+    ports:
+      - "${ORDERS_PROXY_HOST_PORT:-8092}:8080"
+    depends_on:
+      orders-service-direct:
+        condition: service_started   # same image: make sure it is built once
+      proxy:
+        condition: service_healthy
+      oracle:
+        condition: service_healthy
+    restart: unless-stopped
+
+  orders-service-gateway:
+    image: ${DBP_IMAGE_PREFIX:-dbp}/orders-service:${DBP_VERSION:-0.1.0-SNAPSHOT}
+    container_name: dbp-orders-gateway
+    profiles: ["examples"]
+    environment:
+      SPRING_PROFILES_ACTIVE: gateway
+      DBP_GATEWAY_HOST: gateway
+      DBP_GATEWAY_PORT: "7420"
+      DBP_DATASOURCE: sales
+      DBP_DEMO_ENGINE: ${BATCH_ENGINE:-ORACLE}
+      # API key generated by bootstrap (deploy/.generated/examples.env, variable ORDERS_SERVICE_API_KEY)
+      DBP_API_KEY_FILE: /run/dbp/examples.env
+      DBP_API_KEY_VAR: ORDERS_SERVICE_API_KEY
+      ORDERS_POOL_SIZE: ${ORDERS_POOL_SIZE:-10}
+    ports:
+      - "${ORDERS_GATEWAY_HOST_PORT:-8093}:8080"
+    volumes:
+      - ./.generated:/run/dbp:ro
+    depends_on:
+      orders-service-direct:
+        condition: service_started
+      gateway:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  legacy-reporting:
+    build:
+      <<: *build-context
+      dockerfile: dbp-examples/legacy-reporting/Dockerfile
+    image: ${DBP_IMAGE_PREFIX:-dbp}/legacy-reporting:${DBP_VERSION:-0.1.0-SNAPSHOT}
+    container_name: dbp-legacy-reporting
+    profiles: ["examples"]
+    environment:
+      PROXY_HOST: proxy
+      PROXY_PORT: "1521"
+      PROXY_SERVICE: sales.legacy-reporting
+      SALES_APP_PASSWORD: "${SALES_APP_PASSWORD:-SalesApp#Demo2026}"
+      LEGACY_POOL_SIZE: ${LEGACY_POOL_SIZE:-5}
+    ports:
+      - "${LEGACY_HOST_PORT:-8094}:8080"
+    depends_on:
+      proxy:
+        condition: service_healthy
+      oracle:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ===========================================================================================
+  # Batch (profile "batch", run on demand):  docker compose --profile batch run --rm reporting-batch
+  # ===========================================================================================
+  reporting-batch:
+    build:
+      <<: *build-context
+      dockerfile: dbp-examples/reporting-batch/Dockerfile
+    image: ${DBP_IMAGE_PREFIX:-dbp}/reporting-batch:${DBP_VERSION:-0.1.0-SNAPSHOT}
+    profiles: ["batch"]
+    environment:
+      DBP_JDBC_URL: ${BATCH_JDBC_URL:-jdbc:dbp://gateway:7420/sales}
+      DBP_JDBC_USER: ${BATCH_JDBC_USER:-reporting-batch}
+      # empty = take the API key from the bootstrap file below (gateway mode)
+      DBP_JDBC_PASSWORD: ${BATCH_JDBC_PASSWORD:-}
+      DBP_DEMO_ENGINE: ${BATCH_ENGINE:-ORACLE}
+      DBP_API_KEY_FILE: /run/dbp/examples.env
+      DBP_API_KEY_VAR: REPORTING_BATCH_API_KEY
+      DBP_BATCH_CONNECTIONS: ${BATCH_CONNECTIONS:-20}
+      DBP_BATCH_DURATION_SECONDS: ${BATCH_DURATION_SECONDS:-60}
+      DBP_BATCH_REPORT_SECONDS: "10"
+    volumes:
+      - ./.generated:/run/dbp:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
+      proxy:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # ===========================================================================================
+  # Monitoring (profile "monitoring")
+  # ===========================================================================================
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: dbp-prometheus
+    profiles: ["monitoring"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_HOST_PORT:-9090}:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    container_name: dbp-grafana
+    profiles: ["monitoring"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/dbp-overview.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_HOST_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  oracle-data:
+  postgres-data:
+  prometheus-data:
+  grafana-data:

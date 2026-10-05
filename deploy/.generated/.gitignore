@@ -1,0 +1,3 @@
+# Files written by deploy/bootstrap/bootstrap.sh (API keys of the example applications). Never commit them.
+*
+!.gitignore

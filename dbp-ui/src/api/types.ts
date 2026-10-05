@@ -503,6 +503,10 @@ export interface ImpactConsumer {
   queryCount?: number;
   lastSeenAt?: Iso | null;
   viaRoutine?: RoutineRef | null;
+  // not in the written contract yet, but useful to show how an access was observed
+  source?: RelationshipSource;
+  confidence?: number;
+  confirmed?: boolean;
 }
 
 export interface Impact {

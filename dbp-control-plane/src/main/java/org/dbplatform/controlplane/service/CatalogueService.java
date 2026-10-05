@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import org.dbplatform.controlplane.api.dto.RoutineUpdateRequest;
 import org.dbplatform.controlplane.api.dto.TableUpdateRequest;
 import org.dbplatform.controlplane.api.error.ApiException;
 import org.dbplatform.controlplane.domain.DatabaseInstance;
@@ -133,11 +134,17 @@ public class CatalogueService {
     public DbColumn getColumn(String columnId) { return columns.findById(columnId).orElseThrow(() -> new ApiException.NotFound("Column", columnId)); }
 
     /**
-     * Finds a table of a database by name as written in SQL. The schema may be null: then the default
-     * schema is tried, then a unique match by name across schemas.
+     * Finds a table of a database by name as written in SQL. Resolution order for an unqualified name:
+     * the session's {@code defaultSchema}, then the database's configured {@code collector.schemas}
+     * (unique match), then a unique match by name across all schemas.
      */
     @Transactional(readOnly = true)
     public Optional<DbTable> findTable(String databaseId, String schema, String name, String defaultSchema) {
+        return findTable(databaseId, schema, name, defaultSchema, databases.findById(databaseId).map(d -> d.getCollector().getSchemas()).orElse(List.of()));
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<DbTable> findTable(String databaseId, String schema, String name, String defaultSchema, List<String> configuredSchemas) {
         if (name == null) return Optional.empty();
         String n = unquote(name);
         if (n.contains(".") && schema == null) {
@@ -151,17 +158,21 @@ public class CatalogueService {
             if (t.isPresent()) return t;
         }
         List<DbTable> byName = tables.findByDatabaseIdAndNameIgnoreCase(databaseId, n);
+        if (configuredSchemas != null && !configuredSchemas.isEmpty()) {
+            List<DbTable> inConfigured = byName.stream().filter(t -> configuredSchemas.stream().anyMatch(cs -> cs.equalsIgnoreCase(t.getSchema()))).toList();
+            if (inConfigured.size() == 1) return Optional.of(inConfigured.get(0));
+        }
         return byName.size() == 1 ? Optional.of(byName.get(0)) : Optional.empty();
     }
 
     /** Resolves or creates a {@code discovered} placeholder table (telemetry saw it first). */
     public DbTable resolveOrDiscoverTable(DatabaseInstance db, String schema, String name, String defaultSchema) {
-        Optional<DbTable> found = findTable(db.getId(), schema, name, defaultSchema);
+        Optional<DbTable> found = findTable(db.getId(), schema, name, defaultSchema, db.getCollector().getSchemas());
         if (found.isPresent()) return found.get();
         String n = unquote(name);
         String s = schema;
         if (n.contains(".") && s == null) { String[] p = n.split("\\.", 2); s = p[0]; n = p[1]; }
-        if (s == null) s = defaultSchema != null ? defaultSchema : defaultSchemaOf(db);
+        if (s == null) s = defaultSchema != null ? defaultSchema : db.getCollector().getSchemas().size() == 1 ? db.getCollector().getSchemas().get(0) : defaultSchemaOf(db);
         DbTable t = new DbTable();
         t.setId(Ids.newId());
         t.setDatabaseId(db.getId());
@@ -212,6 +223,30 @@ public class CatalogueService {
 
     @Transactional(readOnly = true)
     public Routine getRoutine(String id) { return routines.findById(id).orElseThrow(() -> new ApiException.NotFound("Routine", id)); }
+
+    public Routine updateRoutine(String id, RoutineUpdateRequest in) {
+        Routine r = getRoutine(id);
+        if (in.ownerTeamId() != null) {
+            if (in.ownerTeamId().isBlank()) r.setOwnerTeamId(null);
+            else {
+                teams.findById(in.ownerTeamId()).orElseThrow(() -> new ApiException.BadRequest("Unknown ownerTeamId '" + in.ownerTeamId() + "'"));
+                r.setOwnerTeamId(in.ownerTeamId());
+            }
+        }
+        if (in.description() != null) r.setDescription(in.description());
+        if (in.tags() != null) r.setTags(in.tags());
+        return routines.save(r);
+    }
+
+    public Routine setRoutineOwnership(String id, String teamId) {
+        Routine r = getRoutine(id);
+        if (teamId == null || teamId.isBlank()) r.setOwnerTeamId(null);
+        else {
+            teams.findById(teamId).orElseThrow(() -> new ApiException.BadRequest("Unknown teamId '" + teamId + "'"));
+            r.setOwnerTeamId(teamId);
+        }
+        return routines.save(r);
+    }
 
     @Transactional(readOnly = true)
     public Optional<Routine> findRoutine(String databaseId, String schema, String name, String defaultSchema) {
@@ -314,9 +349,13 @@ public class CatalogueService {
                         default -> Enums.RelationshipKind.READS;
                     };
                     out.merge(d.getToId(), k, (a, b) -> a == Enums.RelationshipKind.WRITES || b == Enums.RelationshipKind.WRITES ? Enums.RelationshipKind.WRITES : Enums.RelationshipKind.READS);
-                    // a table written by a routine may fire triggers: follow TRIGGERS edges of that table
+                    // a table written by a routine may fire triggers: follow TRIGGERS edges of that table;
+                    // a view (Table.kind = VIEW) reads its base tables: follow its REFERENCES/READS edges
                     for (Dependency tr : dependencies.findByFromId(d.getToId())) {
                         if (tr.getKind() == DependencyKind.TRIGGERS && visited.add(tr.getToId())) queue.add(tr.getToId());
+                        else if (tr.getToType() == ObjectType.TABLE && (tr.getKind() == DependencyKind.REFERENCES || tr.getKind() == DependencyKind.READS)) {
+                            out.putIfAbsent(tr.getToId(), Enums.RelationshipKind.READS);
+                        }
                     }
                 } else if (visited.add(d.getToId())) {
                     queue.add(d.getToId());

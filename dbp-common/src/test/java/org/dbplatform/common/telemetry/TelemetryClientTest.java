@@ -18,7 +18,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.awaitility.Awaitility.await;
+import static org.dbplatform.common.testutil.Await.await;
 
 class TelemetryClientTest {
 

@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+# Gateway image (plain Java 21, fat jar dbp-gateway-<ver>-all.jar). Build context is the repository root:
+#   docker build -f deploy/docker/Dockerfile.gateway -t dbp/gateway .
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/root/.m2 \
+    mvn -q -B -pl dbp-gateway -am -DskipTests package \
+ && ls dbp-gateway/target/dbp-gateway-*-all.jar
+
+FROM eclipse-temurin:21-jre
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin dbp
+WORKDIR /app
+COPY --from=build --chown=dbp:dbp /src/dbp-gateway/target/dbp-gateway-*-all.jar /app/app.jar
+USER dbp
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError -Djava.security.egd=file:/dev/./urandom"
+# 7420 wire protocol (jdbc:dbp://), 7421 admin (/health, /metrics, /sessions)
+EXPOSE 7420 7421
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=6 \
+    CMD curl -fsS http://localhost:7421/health || exit 1
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

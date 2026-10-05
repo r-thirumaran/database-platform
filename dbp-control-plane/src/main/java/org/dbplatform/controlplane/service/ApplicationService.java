@@ -112,14 +112,15 @@ public class ApplicationService {
         return apiKeys.findByApplicationIdOrderByCreatedAtAsc(applicationId);
     }
 
-    /** Issues {@code dbp_<prefix>_<secret>}; only sha-256(full key) is stored. */
+    /** Issues {@code dbp_<prefix>_<secret>} (prefix = first 8 chars of the key id); only sha-256(full key) is stored. */
     public IssuedKey issueKey(String applicationId, String label) {
         get(applicationId);
-        String prefix = randomString(8);
+        String id = Ids.newId();
+        String prefix = id.substring(0, 8);           // contract: prefix = first 8 chars of the key id
         String secret = randomString(32);
         String full = "dbp_" + prefix + "_" + secret;
         ApiKey k = new ApiKey();
-        k.setId(Ids.newId());
+        k.setId(id);
         k.setApplicationId(applicationId);
         k.setPrefix(prefix);
         k.setKeyHash(SecretCipher.sha256Hex(full));

@@ -1,0 +1,46 @@
+# Prometheus scrape configuration for the demo stack (deploy/docker-compose.yml, profile "monitoring").
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Control plane: Spring Boot actuator (JVM, HTTP, Hikari of the metadata store, custom dbp_* metrics)
+  - job_name: control-plane
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["control-plane:8080"]
+        labels:
+          component: control-plane
+
+  # Gateway admin port: /metrics (Prometheus text format)
+  - job_name: gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["gateway:7421"]
+        labels:
+          component: gateway
+
+  # Proxy admin port: /metrics
+  - job_name: proxy
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["proxy:7431"]
+        labels:
+          component: proxy
+
+  # Example applications: HikariCP pool metrics (client-side view of connections)
+  - job_name: examples
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["orders-service-direct:8080"]
+        labels: { component: example, app: orders-service, mode: direct }
+      - targets: ["orders-service-proxy:8080"]
+        labels: { component: example, app: orders-service, mode: proxy }
+      - targets: ["orders-service-gateway:8080"]
+        labels: { component: example, app: orders-service, mode: gateway }
+      - targets: ["legacy-reporting:8080"]
+        labels: { component: example, app: legacy-reporting, mode: proxy }

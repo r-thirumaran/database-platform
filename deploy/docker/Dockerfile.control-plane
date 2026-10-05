@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1
+# Control plane image: React UI (dbp-ui) + Spring Boot control plane (dbp-control-plane) in one jar.
+# Build context is the repository root:
+#   docker build -f deploy/docker/Dockerfile.control-plane -t dbp/control-plane .
+
+# ---------------------------------------------------------------------------
+# Stage 1: UI build (Vite) -> /ui/dist
+# ---------------------------------------------------------------------------
+FROM node:22-alpine AS ui
+WORKDIR /ui
+COPY dbp-ui/package.json dbp-ui/package-lock.json* ./
+RUN --mount=type=cache,target=/root/.npm \
+    if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+COPY dbp-ui/ ./
+RUN npm run build
+
+# ---------------------------------------------------------------------------
+# Stage 2: Java build. The UI bundle is copied into the control plane's resources BEFORE Maven
+# packages the module, so process-resources puts it into target/classes/static and the Spring Boot
+# jar serves it from classpath:/static.
+# ---------------------------------------------------------------------------
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /src
+COPY . .
+COPY --from=ui /ui/dist/ dbp-control-plane/src/main/resources/static/
+RUN --mount=type=cache,target=/root/.m2 \
+    mvn -q -B -pl dbp-control-plane -am -DskipTests package \
+ && ls dbp-control-plane/target/*.jar \
+ && unzip -l dbp-control-plane/target/dbp-control-plane-*.jar | grep -q 'BOOT-INF/classes/static/index.html'
+
+# ---------------------------------------------------------------------------
+# Stage 3: runtime
+# ---------------------------------------------------------------------------
+FROM eclipse-temurin:21-jre
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin dbp \
+ && mkdir -p /app/data && chown -R dbp:dbp /app
+WORKDIR /app
+COPY --from=build --chown=dbp:dbp /src/dbp-control-plane/target/dbp-control-plane-*.jar /app/app.jar
+USER dbp
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError -Djava.security.egd=file:/dev/./urandom" \
+    SERVER_PORT=8080
+# /app/data holds the H2 file when the dev profile is used instead of PostgreSQL
+VOLUME ["/app/data"]
+EXPOSE 8080
+HEALTHCHECK --interval=15s --timeout=5s --start-period=90s --retries=10 \
+    CMD curl -fsS http://localhost:8080/actuator/health || exit 1
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

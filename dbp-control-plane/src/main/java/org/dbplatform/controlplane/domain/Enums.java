@@ -14,7 +14,7 @@ public final class Enums {
     public enum OwnerSource { DECLARED, INFERRED, NONE }
     public enum Classification { PII, CONFIDENTIAL, INTERNAL, PUBLIC }
     public enum MigrationState { NOT_PLANNED, PLANNED, IN_PROGRESS, DONE }
-    public enum RoutineKind { PROCEDURE, FUNCTION, PACKAGE, PACKAGE_BODY, TRIGGER, VIEW }
+    public enum RoutineKind { PROCEDURE, FUNCTION, PACKAGE, PACKAGE_BODY, TRIGGER }
     public enum RoutineStatus { VALID, INVALID }
     public enum ObjectType { TABLE, ROUTINE }
     public enum DependencyKind { REFERENCES, READS, WRITES, FOREIGN_KEY, TRIGGERS, CALLS }

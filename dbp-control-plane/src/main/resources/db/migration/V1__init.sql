@@ -181,6 +181,8 @@ CREATE TABLE routine (
     last_ddl_at       TIMESTAMP WITH TIME ZONE,
     last_seen_at      TIMESTAMP WITH TIME ZONE,
     first_seen_at     TIMESTAMP WITH TIME ZONE,
+    description       TEXT,
+    tags              TEXT,
     discovered        BOOLEAN NOT NULL DEFAULT FALSE,
     CONSTRAINT uq_routine UNIQUE (database_id, schema_name, name)
 );

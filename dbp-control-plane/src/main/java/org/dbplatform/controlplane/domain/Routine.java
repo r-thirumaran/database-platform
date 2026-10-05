@@ -3,12 +3,15 @@ package org.dbplatform.controlplane.domain;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.Column;
+import jakarta.persistence.Convert;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Procedure, function, package, trigger or view (views are routines for dependency purposes). */
 @Entity
@@ -27,6 +30,8 @@ public class Routine {
     private Instant lastDdlAt;
     private Instant lastSeenAt;
     private Instant firstSeenAt;
+    private String description;
+    @Convert(converter = JsonConverters.StringList.class) private List<String> tags = new ArrayList<>();
     @Column(nullable = false) private boolean discovered = false;
 
     public String label() { return schema + "." + name; }
@@ -55,6 +60,10 @@ public class Routine {
     public void setLastSeenAt(Instant lastSeenAt) { this.lastSeenAt = lastSeenAt; }
     public Instant getFirstSeenAt() { return firstSeenAt; }
     public void setFirstSeenAt(Instant firstSeenAt) { this.firstSeenAt = firstSeenAt; }
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
+    public List<String> getTags() { return tags; }
+    public void setTags(List<String> tags) { this.tags = tags == null ? new ArrayList<>() : tags; }
     public boolean isDiscovered() { return discovered; }
     public void setDiscovered(boolean discovered) { this.discovered = discovered; }
 }

@@ -1,0 +1,302 @@
+{
+  "version": 1,
+  "description": "Demo configuration of the Database Access Platform: two teams, three example applications, the retail demo schema on Oracle (current) and PostgreSQL (migration target). Imported by deploy/bootstrap/bootstrap.sh through POST /api/v1/import (upsert by name; cross references are by name).",
+
+  "teams": [
+    {
+      "name": "sales-platform",
+      "displayName": "Sales Platform Team",
+      "description": "Owns the sales domain (customers, products, orders, inventory) and the orders-service.",
+      "contacts": ["sales-platform@example.org"],
+      "tags": ["domain:sales"]
+    },
+    {
+      "name": "finance-analytics",
+      "displayName": "Finance Analytics Team",
+      "description": "Owns payments reporting; consumes sales data through the legacy reporting application and a nightly batch.",
+      "contacts": ["finance-analytics@example.org"],
+      "tags": ["domain:finance"]
+    }
+  ],
+
+  "applications": [
+    {
+      "name": "orders-service",
+      "displayName": "Orders Service",
+      "team": "sales-platform",
+      "kind": "SERVICE",
+      "runtime": "KUBERNETES",
+      "description": "Spring Boot REST service placing orders through ORDER_PKG.PLACE_ORDER. Runs in direct, proxy and gateway mode in the demo (dbp-examples/orders-service).",
+      "identityRules": {
+        "cidrs": [],
+        "programNames": ["orders-service"],
+        "machinePatterns": ["orders-service*", "dbp-orders-*"],
+        "serviceAliases": ["orders-service"],
+        "pgApplicationNames": ["orders-service"]
+      },
+      "tags": ["tier:online", "lang:java"]
+    },
+    {
+      "name": "legacy-reporting",
+      "displayName": "Legacy Reporting",
+      "team": "finance-analytics",
+      "kind": "LEGACY",
+      "runtime": "VM",
+      "description": "Oracle-only reporting application; onboarded by pointing its JDBC URL at the proxy (service sales.legacy-reporting). No code change, no platform library (dbp-examples/legacy-reporting).",
+      "identityRules": {
+        "cidrs": [],
+        "programNames": ["legacy-reporting"],
+        "machinePatterns": ["legacy-reporting*", "dbp-legacy-*"],
+        "serviceAliases": ["legacy-reporting"],
+        "pgApplicationNames": []
+      },
+      "tags": ["tier:reporting", "lang:java", "legacy"]
+    },
+    {
+      "name": "reporting-batch",
+      "displayName": "Reporting Batch",
+      "team": "finance-analytics",
+      "kind": "BATCH",
+      "runtime": "KUBERNETES",
+      "description": "Plain Java batch opening many connections in parallel (dbp-examples/reporting-batch); shows logical vs physical connections through the gateway.",
+      "identityRules": {
+        "cidrs": [],
+        "programNames": ["reporting-batch"],
+        "machinePatterns": ["reporting-batch*"],
+        "serviceAliases": ["reporting-batch"],
+        "pgApplicationNames": ["reporting-batch"]
+      },
+      "tags": ["tier:batch", "lang:java"]
+    }
+  ],
+
+  "credentials": [
+    {
+      "name": "sales-oracle-app",
+      "username": "SALES_APP",
+      "provider": "ENV",
+      "ref": "SALES_APP_PASSWORD",
+      "description": "Shared application account on the Oracle demo database (gateway pools). Also carries DBP_COLLECTOR_ROLE in the demo, see demo/sql/oracle/README.md."
+    },
+    {
+      "name": "sales-oracle-collector",
+      "username": "DBP_COLLECTOR",
+      "provider": "ENV",
+      "ref": "DBP_COLLECTOR_PASSWORD",
+      "description": "Read-only collector account on the Oracle demo database (SELECT_CATALOG_ROLE, SELECT ANY DICTIONARY, AUDIT_VIEWER)."
+    },
+    {
+      "name": "sales-postgres-app",
+      "username": "sales_app",
+      "provider": "ENV",
+      "ref": "SALES_APP_PASSWORD",
+      "description": "Shared application role on the PostgreSQL demo database."
+    },
+    {
+      "name": "sales-postgres-collector",
+      "username": "dbp_collector",
+      "provider": "ENV",
+      "ref": "DBP_COLLECTOR_PASSWORD",
+      "description": "Read-only collector role on the PostgreSQL demo database (pg_monitor)."
+    }
+  ],
+
+  "databases": [
+    {
+      "name": "sales-oracle",
+      "engine": "ORACLE",
+      "host": "oracle",
+      "port": 1521,
+      "serviceName": "FREEPDB1",
+      "credential": "sales-oracle-app",
+      "maxPhysicalConnections": 40,
+      "jdbcProperties": {
+        "oracle.jdbc.ReadTimeout": "60000",
+        "v$session.program": "dbp-gateway"
+      },
+      "collector": {
+        "enabled": true,
+        "dictionaryIntervalSeconds": 600,
+        "runtimeIntervalSeconds": 15,
+        "schemas": ["SALES"],
+        "auditTrail": false,
+        "credential": "sales-oracle-collector"
+      },
+      "description": "Oracle Database Free 23 (gvenzl/oracle-free), pluggable database FREEPDB1, schema SALES. Current home of the sales domain.",
+      "tags": ["env:demo", "engine:oracle"]
+    },
+    {
+      "name": "sales-postgres",
+      "engine": "POSTGRES",
+      "host": "postgres",
+      "port": 5432,
+      "serviceName": "sales",
+      "credential": "sales-postgres-app",
+      "maxPhysicalConnections": 30,
+      "jdbcProperties": {
+        "ApplicationName": "dbp-gateway",
+        "currentSchema": "sales",
+        "escapeSyntaxCallMode": "callIfNoReturn"
+      },
+      "collector": {
+        "enabled": true,
+        "dictionaryIntervalSeconds": 600,
+        "runtimeIntervalSeconds": 15,
+        "schemas": ["sales"],
+        "auditTrail": false,
+        "credential": "sales-postgres-collector"
+      },
+      "description": "PostgreSQL 17, database sales, schema sales. Migration target of the sales datasource (same logical model).",
+      "tags": ["env:demo", "engine:postgres", "migration-target"]
+    }
+  ],
+
+  "datasources": [
+    {
+      "name": "sales",
+      "displayName": "Sales domain data",
+      "ownerTeam": "sales-platform",
+      "state": "ACTIVE",
+      "currentDatabase": "sales-oracle",
+      "targetDatabase": "sales-postgres",
+      "poolPolicy": {
+        "mode": "TRANSACTION",
+        "maxConnections": 8,
+        "minIdle": 1,
+        "connectionTimeoutMs": 10000,
+        "idleTimeoutMs": 600000,
+        "maxLifetimeMs": 1800000,
+        "statementTimeoutSeconds": 0,
+        "validationQuery": null
+      },
+      "routingRules": [
+        {
+          "priority": 10,
+          "application": "orders-service",
+          "tag": null,
+          "database": "sales-postgres",
+          "readOnly": false,
+          "enabled": false,
+          "note": "Enable to move orders-service (gateway mode) to PostgreSQL without touching the application; run it with DBP_DEMO_ENGINE=POSTGRES."
+        }
+      ],
+      "description": "Customers, products, orders, order lines, inventory, payments. Small pool on purpose: 20+ logical sessions of the batch share 8 physical connections.",
+      "tags": ["domain:sales"]
+    },
+    {
+      "name": "inventory",
+      "displayName": "Inventory levels",
+      "ownerTeam": "sales-platform",
+      "state": "ACTIVE",
+      "currentDatabase": "sales-oracle",
+      "targetDatabase": null,
+      "poolPolicy": {
+        "mode": "TRANSACTION",
+        "maxConnections": 4,
+        "minIdle": 0,
+        "connectionTimeoutMs": 10000,
+        "idleTimeoutMs": 300000,
+        "maxLifetimeMs": 1800000,
+        "statementTimeoutSeconds": 30,
+        "validationQuery": null
+      },
+      "routingRules": [],
+      "description": "Same physical schema as sales today, separate logical name so stock data can move to its own database later without changing consumers.",
+      "tags": ["domain:sales"]
+    },
+    {
+      "name": "payments",
+      "displayName": "Payments",
+      "ownerTeam": "finance-analytics",
+      "state": "ACTIVE",
+      "currentDatabase": "sales-oracle",
+      "targetDatabase": null,
+      "poolPolicy": {
+        "mode": "SESSION",
+        "maxConnections": 4,
+        "minIdle": 0,
+        "connectionTimeoutMs": 10000,
+        "idleTimeoutMs": 300000,
+        "maxLifetimeMs": 1800000,
+        "statementTimeoutSeconds": 60,
+        "validationQuery": null
+      },
+      "routingRules": [],
+      "description": "Payment data for finance; SESSION pool mode to show the difference to TRANSACTION mode.",
+      "tags": ["domain:finance"]
+    }
+  ],
+
+  "accessGrants": [
+    {
+      "application": "orders-service",
+      "datasource": "sales",
+      "maxLogicalConnections": 50,
+      "maxProxyConnections": 20,
+      "poolModeOverride": null,
+      "readOnly": false,
+      "enabled": true,
+      "note": "Producer of orders; writes through ORDER_PKG."
+    },
+    {
+      "application": "reporting-batch",
+      "datasource": "sales",
+      "maxLogicalConnections": 100,
+      "maxProxyConnections": 50,
+      "poolModeOverride": null,
+      "readOnly": false,
+      "enabled": true,
+      "note": "Nightly aggregations; small UPDATE batches on INVENTORY timestamps."
+    },
+    {
+      "application": "reporting-batch",
+      "datasource": "inventory",
+      "maxLogicalConnections": 20,
+      "maxProxyConnections": 10,
+      "poolModeOverride": null,
+      "readOnly": true,
+      "enabled": true,
+      "note": "Read-only stock reports."
+    },
+    {
+      "application": "legacy-reporting",
+      "datasource": "sales",
+      "maxLogicalConnections": 10,
+      "maxProxyConnections": 10,
+      "poolModeOverride": null,
+      "readOnly": true,
+      "enabled": true,
+      "note": "Legacy app through the proxy only (service alias sales.legacy-reporting); quota 10 proxy connections."
+    },
+    {
+      "application": "legacy-reporting",
+      "datasource": "payments",
+      "maxLogicalConnections": 5,
+      "maxProxyConnections": 5,
+      "poolModeOverride": null,
+      "readOnly": true,
+      "enabled": true,
+      "note": "Monthly revenue report."
+    }
+  ],
+
+  "ownership": [
+    { "database": "sales-oracle",   "schema": "SALES", "table": null,      "team": "sales-platform",    "confirmed": true },
+    { "database": "sales-oracle",   "schema": "SALES", "table": "PAYMENT", "team": "finance-analytics", "confirmed": true },
+    { "database": "sales-postgres", "schema": "sales", "table": null,      "team": "sales-platform",    "confirmed": true },
+    { "database": "sales-postgres", "schema": "sales", "table": "payment", "team": "finance-analytics", "confirmed": true }
+  ],
+
+  "producers": [
+    { "database": "sales-oracle", "schema": "SALES", "table": "ORDERS",     "application": "orders-service" },
+    { "database": "sales-oracle", "schema": "SALES", "table": "ORDER_ITEM", "application": "orders-service" },
+    { "database": "sales-oracle", "schema": "SALES", "table": "PAYMENT",    "application": "orders-service" }
+  ],
+
+  "relationships": [
+    { "application": "legacy-reporting", "database": "sales-oracle", "schema": "SALES", "objectType": "TABLE", "object": "CUSTOMER", "kind": "READS", "source": "DECLARED", "confirmed": true },
+    { "application": "legacy-reporting", "database": "sales-oracle", "schema": "SALES", "objectType": "TABLE", "object": "ORDERS",   "kind": "READS", "source": "DECLARED", "confirmed": true },
+    { "application": "legacy-reporting", "database": "sales-oracle", "schema": "SALES", "objectType": "TABLE", "object": "PAYMENT",  "kind": "READS", "source": "DECLARED", "confirmed": true },
+    { "application": "orders-service",   "database": "sales-oracle", "schema": "SALES", "objectType": "ROUTINE", "object": "ORDER_PKG.PLACE_ORDER", "kind": "CALLS", "source": "DECLARED", "confirmed": true }
+  ]
+}

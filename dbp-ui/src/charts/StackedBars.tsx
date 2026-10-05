@@ -10,12 +10,13 @@ export interface Series { key: string; name: string; color: string }
  * baseline, 2px surface gap between segments, hairline grid, legend always present, table twin
  * behind a toggle so no value is gated behind hover.
  */
-export function StackedBars<T extends Record<string, unknown>>({ data, series, category, height, refetching = false, valueFormat = compact, ariaLabel }: {
+export function StackedBars<T extends object>({ data, series, category, height, refetching = false, valueFormat = compact, ariaLabel }: {
   data: T[]; series: Series[]; category: keyof T & string; height?: number; refetching?: boolean; valueFormat?: (n: number) => string; ariaLabel: string;
 }) {
   const [view, setView] = useState<'chart' | 'table'>('chart');
   const h = height ?? Math.max(160, 34 * data.length + 40);
-  const totals = useMemo(() => data.map((d) => series.reduce((s, x) => s + Number(d[x.key] ?? 0), 0)), [data, series]);
+  const val = (d: T, key: string) => Number((d as Record<string, unknown>)[key] ?? 0);
+  const totals = useMemo(() => data.map((d) => series.reduce((s, x) => s + val(d, x.key), 0)), [data, series]);
   return (
     <div className={`chart-wrap ${refetching ? 'refetching' : ''}`}>
       <div className="row between" style={{ marginBottom: 8 }}>
@@ -72,10 +73,10 @@ export function StackedBars<T extends Record<string, unknown>>({ data, series, c
             </thead>
             <tbody>
               {data.map((d, i) => (
-                <tr key={String(d[category])}>
-                  <td>{String(d[category])}</td>
+                <tr key={String((d as Record<string, unknown>)[category])}>
+                  <td>{String((d as Record<string, unknown>)[category])}</td>
                   {series.map((s) => (
-                    <td key={s.key} className="num">{formatNumber(Number(d[s.key] ?? 0))}</td>
+                    <td key={s.key} className="num">{formatNumber(val(d, s.key))}</td>
                   ))}
                   <td className="num">{formatNumber(totals[i])}</td>
                 </tr>

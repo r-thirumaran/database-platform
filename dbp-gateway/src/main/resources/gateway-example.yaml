@@ -1,0 +1,57 @@
+# dbp-gateway static configuration (used when DBP_CONTROL_PLANE_URL is not set).
+# Point DBP_GATEWAY_CONFIG at a file with this shape. ${ENV_VAR} placeholders are substituted
+# from the environment (use ${ENV_VAR:-default} for a default value).
+
+gatewayId: gw-local
+
+datasources:
+  - name: sales                               # logical name used in jdbc:dbp://gateway:7420/sales
+    engine: ORACLE                            # ORACLE | POSTGRES | MSSQL | H2 | OTHER (used for driver tuning; detected from the DB as well)
+    jdbcUrl: jdbc:oracle:thin:@//oracle.example.org:1521/FREEPDB1
+    username: SALES_APP
+    passwordEnv: SALES_ORACLE_PASSWORD        # password | passwordEnv | passwordFile (exactly one)
+    poolMode: TRANSACTION                     # TRANSACTION (default) | SESSION
+    maxConnections: 40                        # hard cap of physical connections for this gateway instance
+    minIdle: 2
+    connectionTimeoutMs: 10000                # wait for a free physical connection before ERROR 08001
+    idleTimeoutMs: 600000
+    maxLifetimeMs: 1800000
+    statementTimeoutSeconds: 0                # 0 = none; otherwise caps Statement.setQueryTimeout
+    validationQuery: null                     # only set when the driver's isValid() is not usable
+    jdbcProperties:
+      oracle.jdbc.ReadTimeout: "60000"
+      oracle.net.CONNECT_TIMEOUT: "5000"
+
+  - name: inventory
+    engine: POSTGRES
+    jdbcUrl: jdbc:postgresql://postgres.example.org:5432/inventory
+    username: inventory_app
+    passwordFile: /run/secrets/inventory-postgres-password
+    poolMode: TRANSACTION
+    maxConnections: 20
+    minIdle: 1
+    jdbcProperties:
+      socketTimeout: "60"
+
+  - name: scratch
+    engine: H2
+    jdbcUrl: jdbc:h2:mem:scratch;DB_CLOSE_DELAY=-1;MODE=Oracle
+    username: sa
+    password: ""
+    poolMode: SESSION                         # legacy-style: pin a physical connection for the life of the logical session
+    maxConnections: 5
+
+# Optional. When present, every HELLO must carry an apiKey matching one of these applications and the
+# datasource must be listed in its grants; when absent any `application` hint is accepted.
+applications:
+  - name: orders-service
+    apiKey: ${ORDERS_SERVICE_API_KEY:-dbp_orders_dev}
+    datasources:
+      - sales                                 # plain name: default grant
+      - name: inventory                       # or an object with grant options
+        maxLogicalConnections: 50
+        readOnly: true
+        poolMode: TRANSACTION
+  - name: legacy-batch
+    apiKey: dbp_legacy_dev
+    datasources: [scratch]
