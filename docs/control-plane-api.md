@@ -100,7 +100,7 @@ Identity rules are how **proxy** and **collectors** map observed connections to 
 { "id": "…", "name": "sales", "displayName": "Sales domain data", "ownerTeamId": "…",
   "state": "ACTIVE | MIGRATING | RETIRED",
   "currentDatabaseId": "…", "targetDatabaseId": null,
-  "poolPolicy": { "mode": "TRANSACTION | SESSION", "maxConnections": 40, "minIdle": 2,
+  "poolPolicy": { "mode": "TRANSACTION | SESSION", "maxConnections": 40, "minIdle": 2,   // maxConnections is per gateway instance
                   "connectionTimeoutMs": 10000, "idleTimeoutMs": 600000, "maxLifetimeMs": 1800000,
                   "statementTimeoutSeconds": 0, "validationQuery": null },
   "routingRules": [
@@ -108,6 +108,12 @@ Identity rules are how **proxy** and **collectors** map observed connections to 
   ],
   "description": "…", "tags": [], "createdAt": "…", "updatedAt": "…" }
 ```
+Pool mode precedence: `AccessGrant.poolModeOverride` (when set) wins over `Datasource.poolPolicy.mode`; the
+resolved value is returned as `grant.poolMode` and echoed by the gateway in `HELLO_OK.serverProperties.poolMode`.
+`poolPolicy.maxConnections` bounds **one gateway instance**; `Database.maxPhysicalConnections` is the budget for the
+whole database and the control plane warns (not rejects) when the sum over datasources × expected gateway
+instances exceeds it.
+
 Resolution for a given application: first enabled routing rule (ordered by `priority` ascending)
 whose `applicationId` matches, else whose `tag` matches one of the application's tags, else
 `currentDatabaseId`. This is how a single domain migrates app by app from Oracle to PostgreSQL.
@@ -144,7 +150,7 @@ whose `applicationId` matches, else whose `tag` matches one of the application's
 `Routine`
 ```json
 { "id": "…", "databaseId": "…", "schema": "SALES", "name": "ORDER_PKG.PLACE_ORDER",
-  "kind": "PROCEDURE | FUNCTION | PACKAGE | PACKAGE_BODY | TRIGGER | VIEW",
+  "kind": "PROCEDURE | FUNCTION | PACKAGE | PACKAGE_BODY | TRIGGER",   // views are catalogued as Table.kind = VIEW
   "triggerTableId": null, "triggerEvent": null,
   "ownerTeamId": "…", "status": "VALID | INVALID", "lastDdlAt": "…", "lastSeenAt": "…" }
 ```
@@ -177,11 +183,11 @@ Endpoints:
   { "table": {…}, "database": {…}, "ownerTeam": {…}, "producer": Application,
     "consumers": [{ "application": {…}, "team": {…}, "kind": "READS|WRITES|CALLS", "queryCount": 1, "lastSeenAt": "…", "viaRoutine": RoutineRef }],
     "routines": [RoutineRef], "triggers": [RoutineRef], "foreignKeysOut": [TableRef], "foreignKeysIn": [TableRef],
-    "views": [RoutineRef], "queryStats": QueryStats, "topQueries": [QueryStat] }
+    "views": [TableRef], "queryStats": QueryStats, "topQueries": [QueryStat] }
   ```
 * `POST /tables/{id}/ownership` `{ "teamId": "…", "confirmed": true }`
 * `POST /tables/bulk-ownership` `{ "databaseId": "…", "schema": "SALES", "teamId": "…" }` (assign owner to every table in a schema)
-* `GET /routines?databaseId=&schema=&kind=&q=`; `GET /routines/{id}`; `GET /routines/{id}/summary` → `{ routine, dependencies: [Dependency with resolved names], callers: [Application], tables: [TableRef] }`
+* `GET /routines?databaseId=&schema=&kind=&q=`; `GET /routines/{id}`; `PUT /routines/{id}` (ownerTeamId, description, tags); `POST /routines/{id}/ownership` `{ "teamId": "…" }`; `GET /routines/{id}/summary` → `{ routine, dependencies: [Dependency with resolved names], callers: [Application], tables: [TableRef] }`
 * `GET /dependencies?fromId=&toId=&kind=`; `POST /dependencies` (DECLARED); `DELETE /dependencies/{id}` (DECLARED only)
 * `GET /relationships?applicationId=&objectId=&kind=&source=`; `POST /relationships` (DECLARED); `PUT /relationships/{id}` (`confirmed`); `DELETE /relationships/{id}`
 
@@ -205,7 +211,7 @@ Endpoints:
     "owner": Team, "producer": Application,
     "directConsumers": [{ "application": {…}, "team": {…}, "kind": "READS", "queryCount": 1, "lastSeenAt": "…" }],
     "indirectConsumers": [{ "application": {…}, "team": {…}, "viaRoutine": RoutineRef, "kind": "WRITES" }],
-    "routines": [RoutineRef], "triggers": [RoutineRef], "dependentViews": [RoutineRef],
+    "routines": [RoutineRef], "triggers": [RoutineRef], "dependentViews": [TableRef],
     "foreignKeyDependents": [TableRef],
     "teamsAffected": [Team], "queryStats": { "count24h": 1, "count7d": 1, "lastSeenAt": "…" },
     "riskScore": 0.72, "riskFactors": ["4 consuming teams", "written by trigger", "PII"] }

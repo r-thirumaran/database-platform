@@ -24,6 +24,7 @@ unreachable the component keeps serving traffic and drops the oldest events once
   "datasource": "sales",
   "databaseId": "…",                     // null in static mode
   "engine": "ORACLE",
+  "defaultSchema": "SALES",              // session default schema when known, else null
   "sqlHash": "9f2b…",                    // sha-256 (hex) of sqlNormalized
   "sqlNormalized": "SELECT … FROM sales.customer WHERE id = ?",   // literals replaced by ?, whitespace collapsed, max 4000 chars
   "operation": "SELECT | INSERT | UPDATE | DELETE | MERGE | CALL | DDL | TXN | OTHER",
@@ -108,7 +109,7 @@ show them without a second channel.
 | V$SESSION sample: session with PORT p matches ConnectionEvent.proxyLocalPort p & SQL_ID s; V$SQL_PLAN(s) touches T | Relationship A READS/WRITES T | PROXY_CORRELATION |
 | V$SESSION sample: PROGRAM/MACHINE matches application identity rules; SQL_ID → tables | Relationship A READS/WRITES T              | COLLECTOR_SESSION      |
 | UNIFIED_AUDIT_TRAIL row: CLIENT_PROGRAM_NAME/USERHOST → A; OBJECT → T; ACTION → READ/WRITE | Relationship A READS/WRITES T          | COLLECTOR_AUDIT        |
-| DBA_DEPENDENCIES: routine R references T                     | Dependency R REFERENCES T (READS/WRITES when DBA_SOURCE parse is conclusive) | DICTIONARY |
+| DBA_DEPENDENCIES (ALL_DEPENDENCIES fallback): routine R references T                     | Dependency R REFERENCES T (READS/WRITES when DBA_SOURCE parse is conclusive) | DICTIONARY |
 | DBA_TRIGGERS: trigger G on T                                 | Dependency T TRIGGERS G; G's dependencies expanded      | DICTIONARY             |
 | DBA_CONSTRAINTS type R: T1 → T2                              | Dependency T1 FOREIGN_KEY T2                            | DICTIONARY             |
 | Table written only by application A over the window          | `producerApplicationId` suggestion (`ownerSource = INFERRED`, never overwrites a DECLARED producer) | derived |

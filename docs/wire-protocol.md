@@ -117,7 +117,7 @@ HELLO `properties` keys (all strings):
 | key             | required | meaning                                                                 |
 |-----------------|----------|-------------------------------------------------------------------------|
 | `datasource`    | yes      | logical datasource name, taken from the JDBC URL path                   |
-| `apiKey`        | no*      | application credential issued by the control plane (`dbp_<id>_<secret>`). *Required unless the gateway runs in `static` auth mode. |
+| `apiKey`        | no*      | application credential issued by the control plane (`dbp_<prefix>_<secret>`). *Required unless the gateway runs in `static` auth mode. |
 | `application`   | no       | application name hint (used only when the gateway runs without a control plane) |
 | `user`          | no       | logical user name passed to `DriverManager.getConnection(url, user, pw)` (informational) |
 | `autoCommit`    | no       | `"true"`/`"false"`, default `"true"`                                     |
