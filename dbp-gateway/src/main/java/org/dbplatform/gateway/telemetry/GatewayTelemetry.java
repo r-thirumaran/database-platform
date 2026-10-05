@@ -110,9 +110,6 @@ public final class GatewayTelemetry implements AutoCloseable {
         }
         boolean success = o.error() == null;
         metrics.recordStatement(s.datasource(), a.operation().name(), success, o.durationNanos());
-        if (!success) {
-            metrics.recordError(o.error().getSQLState());
-        }
         if (client == null) {
             return;
         }

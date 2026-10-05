@@ -264,7 +264,7 @@ class H2GatewayTest {
     void updateCountsAndGeneratedKeys() {
         try (TestClient c = gw.client("h2")) {
             assertThat(c.exec("INSERT INTO tx_t VALUES (100, 'a'), (101, 'b')").updateCount()).isEqualTo(2);
-            assertThat(c.update("DELETE FROM tx_t WHERE id >= ?", 100).updateCount()).isEqualTo(2);
+            assertThat(c.update("DELETE FROM tx_t WHERE id IN (?, ?)", 100, 101).updateCount()).isEqualTo(2);
 
             TestClient.ExecResult r = c.execute(Execute.direct("INSERT INTO keys_t (v) VALUES (?)", StatementKind.PREPARED,
                     List.of("x"), new Execute.ExecOptions(0, 0, 0, Execute.Expect.UPDATE, Statement.RETURN_GENERATED_KEYS, List.of())));

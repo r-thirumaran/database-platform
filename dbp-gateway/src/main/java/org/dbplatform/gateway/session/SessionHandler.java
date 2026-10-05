@@ -337,13 +337,16 @@ public final class SessionHandler implements Runnable {
             }
             ErrorMessage err = toError(e);
             LOG.debug("session {}: {} {}", session.id(), err.sqlState(), err.message());
+            metrics.recordError(err.sqlState());
             Messages.write(out, err);
         } catch (ProtocolException e) {
             // oversize outgoing frame etc.: the request failed but the connection is intact
             LOG.warn("session {}: {}", session.id(), e.getMessage());
+            metrics.recordError(ErrorMessage.STATE_GENERAL);
             Messages.write(out, ErrorMessage.of(ErrorMessage.STATE_GENERAL, e.getMessage()));
         } catch (RuntimeException e) {
             LOG.error("session {}: internal error handling {}", session.id(), m.type(), e);
+            metrics.recordError(ErrorMessage.STATE_GENERAL);
             Messages.write(out, ErrorMessage.of(ErrorMessage.STATE_GENERAL, "internal gateway error: " + e));
         } finally {
             session.executing(false);
