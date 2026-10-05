@@ -1,5 +1,8 @@
 package org.dbplatform.controlplane.api;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.validation.Valid;
 import java.util.List;
 import java.util.Map;
@@ -25,22 +28,48 @@ public class CatalogueController {
     private final CatalogueService catalogue;
     private final SummaryService summaries;
 
-    public CatalogueController(CatalogueService catalogue, SummaryService summaries) { this.catalogue = catalogue; this.summaries = summaries; }
+    private final ObjectMapper json;
+
+    public CatalogueController(CatalogueService catalogue, SummaryService summaries, ObjectMapper json) {
+        this.catalogue = catalogue; this.summaries = summaries; this.json = json;
+    }
 
     // ---- tables
     @GetMapping("/tables")
     public Object tables(@RequestParam(required = false) String databaseId, @RequestParam(required = false) String schema,
                          @RequestParam(required = false) String q, @RequestParam(required = false) String ownerTeamId,
                          @RequestParam(required = false, defaultValue = "false") boolean unowned,
+                         @RequestParam(required = false) String classification,
                          @RequestParam(required = false) Integer page, @RequestParam(required = false) Integer size) {
-        return Paged.of(catalogue.searchTables(databaseId, schema, q, ownerTeamId, unowned), page, size);
+        return Paged.of(catalogue.searchTables(databaseId, schema, q, ownerTeamId, unowned, classification), page, size);
     }
     @GetMapping("/tables/{id}") public DbTable table(@PathVariable String id) { return catalogue.getTable(id); }
-    @PutMapping("/tables/{id}") public DbTable updateTable(@PathVariable String id, @RequestBody TableUpdateRequest body) { return catalogue.updateTable(id, body); }
+
+    /** Absent fields are left unchanged; an explicit JSON {@code null} (or a blank string) clears the value. */
+    @PutMapping("/tables/{id}")
+    public DbTable updateTable(@PathVariable String id, @RequestBody ObjectNode body) {
+        for (String field : List.of("ownerTeamId", "producerApplicationId", "description", "classification")) {
+            if (body.has(field) && body.get(field).isNull()) body.put(field, "");
+        }
+        if (body.has("tags") && body.get("tags").isNull()) body.putArray("tags");
+        try {
+            return catalogue.updateTable(id, json.treeToValue(body, TableUpdateRequest.class));
+        } catch (JsonProcessingException e) {
+            throw new ApiException.BadRequest("Malformed table update: " + e.getOriginalMessage());
+        }
+    }
     @GetMapping("/tables/{id}/columns") public List<DbColumn> columns(@PathVariable String id) { return catalogue.columns(id); }
+
+    /** {@code comment} / {@code classification}: absent = unchanged, {@code null} or blank = cleared. */
     @PutMapping("/tables/{id}/columns/{columnId}")
-    public DbColumn updateColumn(@PathVariable String id, @PathVariable String columnId, @RequestBody Map<String, String> body) {
-        return catalogue.updateColumn(id, columnId, body.get("comment"), body.get("classification"));
+    public DbColumn updateColumn(@PathVariable String id, @PathVariable String columnId, @RequestBody Map<String, Object> body) {
+        return catalogue.updateColumn(id, columnId, presentOrNull(body, "comment"), presentOrNull(body, "classification"));
+    }
+
+    private static String presentOrNull(Map<String, Object> body, String key) {
+        if (!body.containsKey(key)) return null;
+        Object v = body.get(key);
+        return v == null ? "" : String.valueOf(v);
     }
     @GetMapping("/tables/{id}/summary") public SummaryService.TableSummary tableSummary(@PathVariable String id) { return summaries.table(id); }
     @PostMapping("/tables/{id}/ownership")

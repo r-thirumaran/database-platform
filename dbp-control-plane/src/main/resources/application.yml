@@ -14,7 +14,8 @@ spring:
     enabled: true
     locations: classpath:db/migration
   jackson:
-    default-property-inclusion: non_null
+    # The contract (docs/control-plane-api.md) shows nullable fields as explicit nulls (targetDatabaseId, ref, viaRoutine…)
+    default-property-inclusion: always
     serialization:
       write-dates-as-timestamps: false
   mvc:

@@ -3,7 +3,9 @@ package org.dbplatform.controlplane.service;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.dbplatform.controlplane.api.error.ApiException;
 import org.dbplatform.controlplane.domain.AccessGrant;
@@ -178,10 +180,27 @@ public class DatasourceService {
         d.setUpdatedAt(Instant.now());
     }
 
+    /**
+     * Replaces the rule list: rules whose id is already present are updated in place (the UI sends the full list back
+     * with ids when it edits or toggles one), unknown ids are added, missing ones are removed (orphanRemoval).
+     */
     private void replaceRulesInPlace(Datasource d, List<RoutingRule> rules) {
         List<RoutingRule> fresh = normalizeRules(rules);
-        d.getRoutingRules().clear();
-        d.getRoutingRules().addAll(fresh);
+        Map<String, RoutingRule> incoming = new LinkedHashMap<>();
+        for (RoutingRule r : fresh) incoming.put(r.getId(), r);
+        List<RoutingRule> current = d.getRoutingRules();
+        current.removeIf(r -> !incoming.containsKey(r.getId()));
+        for (RoutingRule existing : current) {
+            RoutingRule f = incoming.remove(existing.getId());
+            existing.setPriority(f.getPriority());
+            existing.setApplicationId(f.getApplicationId());
+            existing.setTag(f.getTag());
+            existing.setDatabaseId(f.getDatabaseId());
+            existing.setReadOnly(f.isReadOnly());
+            existing.setEnabled(f.isEnabled());
+        }
+        current.addAll(incoming.values());
+        current.sort(Comparator.comparingInt(RoutingRule::getPriority));
         d.setUpdatedAt(Instant.now());
     }
 

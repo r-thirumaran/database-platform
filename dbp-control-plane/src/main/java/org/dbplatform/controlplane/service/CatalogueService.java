@@ -94,8 +94,21 @@ public class CatalogueService {
 
     @Transactional(readOnly = true)
     public List<DbTable> searchTables(String databaseId, String schema, String q, String ownerTeamId, boolean unowned) {
+        return searchTables(databaseId, schema, q, ownerTeamId, unowned, null);
+    }
+
+    @Transactional(readOnly = true)
+    public List<DbTable> searchTables(String databaseId, String schema, String q, String ownerTeamId, boolean unowned, String classification) {
         String like = q == null || q.isBlank() ? null : "%" + q.trim() + "%";
-        return tables.search(blankToNull(databaseId), blankToNull(schema), blankToNull(ownerTeamId), unowned, like);
+        List<DbTable> found = tables.search(blankToNull(databaseId), blankToNull(schema), blankToNull(ownerTeamId), unowned, like);
+        if (classification == null || classification.isBlank()) return found;
+        Enums.Classification wanted;
+        try {
+            wanted = Enums.Classification.valueOf(classification.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new ApiException.BadRequest("classification must be one of PII, CONFIDENTIAL, INTERNAL, PUBLIC");
+        }
+        return found.stream().filter(t -> t.getClassification() == wanted).toList();
     }
 
     @Transactional(readOnly = true)
@@ -122,7 +135,7 @@ public class CatalogueService {
                 t.setProducerApplicationId(in.producerApplicationId()); t.setProducerSource(Enums.OwnerSource.DECLARED);
             }
         }
-        if (in.description() != null) t.setDescription(in.description());
+        if (in.description() != null) t.setDescription(blankToNull(in.description()));
         if (in.tags() != null) t.setTags(in.tags());
         if (in.classification() != null) t.setClassification(in.classification().isBlank() ? null : Enums.Classification.valueOf(in.classification()));
         if (in.migration() != null) t.setMigration(in.migration());
@@ -154,7 +167,7 @@ public class CatalogueService {
 
     public DbColumn updateColumn(String tableId, String columnId, String comment, String classification) {
         DbColumn c = columns.findById(columnId).filter(x -> x.getTableId().equals(tableId)).orElseThrow(() -> new ApiException.NotFound("Column", columnId));
-        if (comment != null) c.setComment(comment);
+        if (comment != null) c.setComment(comment.isBlank() ? null : comment);
         if (classification != null) c.setClassification(classification.isBlank() ? null : Enums.Classification.valueOf(classification));
         return columns.save(c);
     }

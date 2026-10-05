@@ -22,6 +22,7 @@ import org.dbplatform.controlplane.repo.RelationshipRepository;
 import org.dbplatform.controlplane.repo.RoutineRepository;
 import org.dbplatform.controlplane.repo.SchemaOwnershipRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
@@ -96,9 +97,15 @@ public class DatabaseService {
         configVersion.bump();
     }
 
-    public record TestResult(boolean ok, String productName, String productVersion, long latencyMs, String error) {}
+    /** {@code { ok, productName, productVersion, latencyMs }} on success; {@code { ok: false, message }} when the connection fails. */
+    public record TestResult(boolean ok, String productName, String productVersion, long latencyMs, String message) {}
 
-    /** Opens one JDBC connection with the database's platform credential. */
+    /**
+     * Opens one JDBC connection with the database's platform credential. Runs outside any transaction: a failed
+     * credential lookup throws inside a nested {@code @Transactional} call and would otherwise mark a surrounding
+     * transaction rollback-only, turning the {@code ok: false} answer into a 500.
+     */
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public TestResult testConnection(String id) {
         DatabaseInstance d = get(id);
         long start = System.nanoTime();
