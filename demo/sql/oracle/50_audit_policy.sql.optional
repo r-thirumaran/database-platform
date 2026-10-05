@@ -1,0 +1,50 @@
+-- =====================================================================================
+-- 50_audit_policy.sql.optional  --  Unified audit policy on the SALES tables (DISABLED BY DEFAULT)
+--
+-- The container entrypoint only executes *.sql and *.sh files, so this file is ignored until it is
+-- renamed to 50_audit_policy.sql (or run manually as SYSDBA against FREEPDB1).
+--
+-- Why it is optional
+--   * Auditing every SELECT on the demo tables produces one UNIFIED_AUDIT_TRAIL row per statement.
+--     With the reporting-batch example running at a few thousand statements per second this fills
+--     the audit trail (and SYSAUX) quickly. Use it for short demonstrations only.
+--   * The platform does not need it: the gateway sees every statement itself, the proxy correlates
+--     V$SESSION rows by port, and the collector samples V$SESSION/V$SQL. The audit collector
+--     (database.collector.auditTrail = true in the control plane) is the fourth, highest-confidence
+--     source for applications that still connect directly to the database.
+--
+-- What it demonstrates
+--   UNIFIED_AUDIT_TRAIL.CLIENT_PROGRAM_NAME / USERHOST / OS_USERNAME identify the application
+--   (identity rules programNames / machinePatterns), OBJECT_SCHEMA/OBJECT_NAME identify the table
+--   and ACTION_NAME gives READ vs WRITE. The DBP_COLLECTOR account reads the trail through the
+--   AUDIT_VIEWER role granted in 01_users.sql.
+--
+-- Oracle Database Free 23 runs unified auditing in pure mode, nothing has to be relinked.
+-- =====================================================================================
+WHENEVER SQLERROR EXIT SQL.SQLCODE
+ALTER SESSION SET CONTAINER = FREEPDB1;
+
+CREATE AUDIT POLICY DBP_SALES_ACCESS_POL
+    ACTIONS SELECT ON SALES.CUSTOMER,   INSERT ON SALES.CUSTOMER,   UPDATE ON SALES.CUSTOMER,   DELETE ON SALES.CUSTOMER,
+            SELECT ON SALES.PRODUCT,    INSERT ON SALES.PRODUCT,    UPDATE ON SALES.PRODUCT,    DELETE ON SALES.PRODUCT,
+            SELECT ON SALES.ORDERS,     INSERT ON SALES.ORDERS,     UPDATE ON SALES.ORDERS,     DELETE ON SALES.ORDERS,
+            SELECT ON SALES.ORDER_ITEM, INSERT ON SALES.ORDER_ITEM, UPDATE ON SALES.ORDER_ITEM, DELETE ON SALES.ORDER_ITEM,
+            SELECT ON SALES.INVENTORY,  INSERT ON SALES.INVENTORY,  UPDATE ON SALES.INVENTORY,  DELETE ON SALES.INVENTORY,
+            SELECT ON SALES.PAYMENT,    INSERT ON SALES.PAYMENT,    UPDATE ON SALES.PAYMENT,    DELETE ON SALES.PAYMENT,
+            EXECUTE ON SALES.ORDER_PKG,
+            EXECUTE ON SALES.GET_ORDERS_FOR_CUSTOMER
+    -- only sessions of the shared application account; evaluated once per session (cheap)
+    WHEN 'SYS_CONTEXT(''USERENV'', ''SESSION_USER'') = ''SALES_APP'''
+    EVALUATE PER SESSION;
+
+AUDIT POLICY DBP_SALES_ACCESS_POL;
+
+-- Housekeeping hint (run as SYSDBA when the trail grows):
+--   BEGIN
+--     DBMS_AUDIT_MGMT.CLEAN_AUDIT_TRAIL(audit_trail_type => DBMS_AUDIT_MGMT.AUDIT_TRAIL_UNIFIED,
+--                                      use_last_arch_timestamp => FALSE);
+--   END;
+--   /
+-- To switch the policy off again:  NOAUDIT POLICY DBP_SALES_ACCESS_POL;  DROP AUDIT POLICY DBP_SALES_ACCESS_POL;
+
+EXIT
