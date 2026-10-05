@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Database Access Platform</title>
+  <style>
+    :root { --fg: #1f2933; --muted: #52606d; --bg: #f5f7fa; --card: #ffffff; --accent: #2563eb; }
+    @media (prefers-color-scheme: dark) { :root { --fg: #e4e7eb; --muted: #9aa5b1; --bg: #111827; --card: #1f2937; --accent: #60a5fa; } }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--fg);
+           min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; }
+    main { background: var(--card); border-radius: 12px; padding: 32px; max-width: 560px; box-shadow: 0 4px 24px rgba(0,0,0,.08); }
+    h1 { margin: 0 0 8px; font-size: 1.4rem; }
+    p { color: var(--muted); line-height: 1.5; }
+    a { color: var(--accent); }
+    code { background: rgba(127,127,127,.15); padding: 2px 6px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Database Access Platform — control plane</h1>
+    <p>The UI build is missing from this image. Build <code>dbp-ui</code> and copy its <code>dist/</code> into
+       <code>classpath:/static/</code> (the Docker build does this), or run the Vite dev server on port 5173.</p>
+    <p>Meanwhile the API is up: <a href="/swagger-ui.html">Swagger UI</a> · <a href="/v3/api-docs">OpenAPI JSON</a>
+       · <a href="/actuator/health">health</a> · <a href="/api/v1/stats/overview">stats overview</a></p>
+  </main>
+</body>
+</html>

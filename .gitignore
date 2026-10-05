@@ -1,0 +1,36 @@
+# Java / Maven
+target/
+*.class
+*.jar
+!**/lib/*.jar
+*.log
+hs_err_pid*
+.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+*.swp
+
+# Node / UI
+node_modules/
+dbp-ui/dist/
+dbp-ui/.vite/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local runtime data
+data/
+*.db
+*.mv.db
+*.trace.db
+.env
+.env.local
+deploy/.env
