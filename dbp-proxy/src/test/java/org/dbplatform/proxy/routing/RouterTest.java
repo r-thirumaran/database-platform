@@ -64,7 +64,7 @@ class RouterTest {
 
     @Test
     void defaultRouteCanRewrite() {
-        ListenerConfig l = new ListenerConfig("p", Engine.POSTGRES, null, 0, null, List.of(),
+        ListenerConfig l = new ListenerConfig("p", Engine.POSTGRES, null, null, null, List.of(),
                 RouteConfig.defaultRoute("pg", 5432, "postgres", true));
         assertThat(l.port()).isEqualTo(5432);
         RouteDecision d = Router.route(l, "anything");

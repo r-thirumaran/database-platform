@@ -2,6 +2,8 @@ package org.dbplatform.proxy.net;
 
 import org.dbplatform.proxy.config.ListenerConfig;
 import org.dbplatform.proxy.oracle.OracleConnectionHandler;
+import org.dbplatform.proxy.oracle.TnsParseException;
+import org.dbplatform.proxy.postgres.PgProtocolException;
 import org.dbplatform.proxy.postgres.PostgresConnectionHandler;
 import org.dbplatform.proxy.registry.LiveConnection;
 import org.slf4j.Logger;
@@ -124,6 +126,13 @@ public final class ListenerRuntime {
             LOG.debug("{} ended with I/O error: {}", live.id(), e.toString());
             if (ctx != null) {
                 ctx.closed("I/O error: " + e.getMessage());
+            }
+        } catch (TnsParseException | PgProtocolException e) {
+            // not a database client (port scanner, HTTP probe, wrong port): one line, no stack trace
+            LOG.info("{} from {}:{} rejected: {}", live.id(), live.clientAddr(), live.clientPort(), e.getMessage());
+            rt.metrics().refused(live.listener(), "protocol");
+            if (ctx != null) {
+                ctx.closed("protocol error: " + e.getMessage());
             }
         } catch (RuntimeException e) {
             LOG.warn("{} ended with error: {}", live.id(), e.toString(), e);

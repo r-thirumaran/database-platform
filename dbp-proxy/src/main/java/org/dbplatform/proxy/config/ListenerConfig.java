@@ -5,13 +5,16 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 import java.util.List;
 
-/** A TCP listener: engine, port and the routes it knows. */
+/**
+ * A TCP listener: engine, port and the routes it knows. A missing port means the engine's conventional
+ * port (1521 / 5432 / 1433); port 0 binds an ephemeral port (tests).
+ */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record ListenerConfig(
         String name,
         Engine engine,
         @JsonAlias({"bind", "address"}) String bindAddress,
-        int port,
+        Integer port,
         Integer maxConnections,
         List<RouteConfig> routes,
         RouteConfig defaultRoute) {
@@ -22,7 +25,7 @@ public record ListenerConfig(
         if (engine == null) {
             throw new IllegalArgumentException("listener" + (name == null ? "" : " '" + name + "'") + " requires an engine");
         }
-        if (port == 0) {
+        if (port == null) {
             port = engine.defaultPort();
         }
         if (port < 0 || port > 65535) {
@@ -48,7 +51,7 @@ public record ListenerConfig(
 
     /** True when the socket-level identity (engine, bind address, port) is unchanged, so the server socket can stay. */
     public boolean sameSocket(ListenerConfig other) {
-        return other != null && engine == other.engine && port == other.port
+        return other != null && engine == other.engine && java.util.Objects.equals(port, other.port)
                 && java.util.Objects.equals(bindAddress, other.bindAddress);
     }
 }

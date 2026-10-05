@@ -95,16 +95,15 @@ public final class TnsNode {
         return n == null ? null : n.value;
     }
 
-    /** Get-or-create the child with the given key and set its scalar value. */
+    /** Get-or-create the child with the given key and set its scalar value; returns this node for chaining. */
     public TnsNode put(String childKey, String childValue) {
         TnsNode c = child(childKey);
         if (c == null) {
-            c = new TnsNode(childKey, childValue);
-            add(c);
+            add(new TnsNode(childKey, childValue));
         } else {
             c.setValue(childValue);
         }
-        return c;
+        return this;
     }
 
     public boolean remove(String childKey) {

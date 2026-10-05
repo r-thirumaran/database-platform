@@ -210,14 +210,21 @@ public final class ConnectionContext implements AutoCloseable {
         closed(reason);
     }
 
+    /** The connection is over: the registry slot is released first, then CLOSE is emitted (if OPEN was). */
     public void closed(String reason) {
+        live.markClosed(reason);
+        releaseSlot();
         if (openEmitted && !terminalEmitted) {
             terminalEmitted = true;
-            live.markClosed(reason);
             rt.events().closed(live, reason);
             LOG.info("{} closed after {} ms in={} out={} ({})", live.id(), live.durationMillis(), live.bytesIn(), live.bytesOut(), reason);
-        } else {
-            live.markClosed(reason);
+        }
+    }
+
+    private void releaseSlot() {
+        if (admitted) {
+            admitted = false;
+            rt.quotas().release(live);
         }
     }
 
@@ -227,10 +234,7 @@ public final class ConnectionContext implements AutoCloseable {
         if (backend != null) {
             closeQuietly(backend);
         }
-        if (admitted) {
-            admitted = false;
-            rt.quotas().release(live);
-        }
+        releaseSlot();
         if (live.state() != LiveConnection.State.CLOSED && live.state() != LiveConnection.State.REFUSED) {
             live.markClosed(live.reason() == null ? "closed" : live.reason());
         }
