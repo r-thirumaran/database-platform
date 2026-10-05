@@ -16,6 +16,7 @@ domain (customers, orders, products, inventory, payments).
 | `dbp-control-plane/` | Spring Boot 3 REST API, metadata store, collectors, governance; serves the UI build | Maven |
 | `dbp-ui/`            | React + TypeScript + Vite single-page app                    | npm            |
 | `dbp-examples/`      | Example applications (legacy via proxy, same code via gateway, batch job) | Maven |
+| `dbp-integration-tests/` | End-to-end tests: embedded PostgreSQL + control plane + gateway + proxy as real processes, driven through the driver and the REST API (`mvn -f dbp-integration-tests/pom.xml verify`) | Maven |
 | `demo/`              | Demo schemas and data for Oracle and PostgreSQL              | SQL            |
 | `deploy/`            | Dockerfiles, docker-compose, Kubernetes manifests, Helm chart, Prometheus/Grafana | – |
 | `docs/`              | Architecture, specifications, runbooks, ADRs                  | –              |
@@ -33,15 +34,16 @@ domain (customers, orders, products, inventory, payments).
   the zonky embedded PostgreSQL (no Docker required). Oracle/SQL Server specific code is unit-tested
   with synthetic inputs and exercised for real through `deploy/docker-compose.yml`.
 * Only the module owner edits a module; the root `pom.xml`, `README.md`, `docs/*.md` contracts and
-  `deploy/` are edited by the integrator.
+  `deploy/` are edited by the integrator. Module READMEs describe what was built; `docs/operations.md`
+  and the deploy assets are reconciled against them (variable names, defaults, metric names, endpoints).
 
 ## Ports
 
 | Component              | Port(s)                                        |
 |------------------------|------------------------------------------------|
 | control plane          | 8080 (API + UI)                                |
-| gateway                | 7420 (wire protocol), 7421 (admin: /health, /metrics, /sessions) |
-| proxy                  | 1521 (Oracle listener), 5432 (PostgreSQL listener), 1433 (SQL Server listener), 7431 (admin: /health, /metrics, /connections) |
+| gateway                | 7420 (wire protocol), 7421 (admin: /health, /metrics, /sessions, /pools) |
+| proxy                  | 1521 (Oracle listener), 5432 (PostgreSQL listener), 1433 (SQL Server listener), 7431 (admin: /health, /metrics open; /connections, /config need `X-DBP-Service-Token` when `DBP_SERVICE_TOKEN` is set) |
 | UI dev server          | 5173 (proxies `/api` to 8080)                  |
 | demo Oracle            | 1522 → container 1521 (so the proxy can own 1521 on the host) |
 | demo PostgreSQL        | 5433 → container 5432                          |

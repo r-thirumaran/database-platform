@@ -68,6 +68,10 @@ public final class SessionHandler implements Runnable {
 
     private static final Logger LOG = LoggerFactory.getLogger(SessionHandler.class);
     private static final int BUFFER = 64 * 1024;
+    /** A HELLO never needs more than this: unauthenticated peers cannot make the gateway allocate a 64 MiB frame. */
+    static final int MAX_HELLO_FRAME_BYTES = 256 * 1024;
+    /** Unauthenticated connections must say HELLO within this time (seconds), whatever the idle timeout is. */
+    static final int HELLO_TIMEOUT_SECONDS = 15;
 
     private final Socket socket;
     private final GatewayConfig config;
@@ -107,11 +111,14 @@ public final class SessionHandler implements Runnable {
         String peer = String.valueOf(socket.getRemoteSocketAddress());
         try {
             socket.setTcpNoDelay(true);
-            socket.setSoTimeout(Math.max(0, config.idleTimeoutSeconds()) * 1000);
-            FrameReader in = new FrameReader(new BufferedInputStream(socket.getInputStream(), BUFFER), config.maxFrameBytes());
+            int idleMillis = (int) Math.min(Integer.MAX_VALUE, Math.max(0, config.idleTimeoutSeconds()) * 1000L);
+            socket.setSoTimeout(idleMillis > 0 ? Math.min(idleMillis, HELLO_TIMEOUT_SECONDS * 1000) : HELLO_TIMEOUT_SECONDS * 1000);
+            BufferedInputStream buffered = new BufferedInputStream(socket.getInputStream(), BUFFER);
+            FrameReader in = new FrameReader(buffered, config.maxFrameBytes());
             out = new FrameWriter(new BufferedOutputStream(socket.getOutputStream(), BUFFER), config.maxFrameBytes());
 
-            Frame first = in.readFrame();
+            // the first frame is read with a small limit: nothing is allocated for an unauthenticated peer beyond it
+            Frame first = new FrameReader(buffered, Math.min(config.maxFrameBytes(), MAX_HELLO_FRAME_BYTES)).readFrame();
             if (first.type() != MessageType.HELLO) {
                 sendFatal(ErrorMessage.STATE_GENERAL, "protocol violation: expected HELLO, got " + first.type());
                 return;
@@ -120,6 +127,7 @@ public final class SessionHandler implements Runnable {
             if (!handshake(hello, peer)) {
                 return;
             }
+            socket.setSoTimeout(idleMillis);
             StatementExecutor executor = new StatementExecutor(session, out, config.rowsFrameSoftBytes(), telemetry);
             while (!session.isClosed()) {
                 Frame frame = in.readFrame();
@@ -210,6 +218,13 @@ public final class SessionHandler implements Runnable {
             LOG.warn("{}: HELLO for datasource '{}' failed: {}", peer, datasource, e.getMessage());
             metrics.recordError(e.getSQLState());
             sendFatal(e.getSQLState() != null ? e.getSQLState() : ErrorMessage.STATE_CONNECTION_UNABLE, e.getMessage());
+            return false;
+        } catch (RuntimeException e) {
+            // e.g. an unresolvable passwordEnv in static mode: the slot reserved in the registry must not leak
+            registry.unregister(s);
+            LOG.warn("{}: HELLO for datasource '{}' failed: {}", peer, datasource, e.toString());
+            metrics.recordError(ErrorMessage.STATE_CONNECTION_UNABLE);
+            sendFatal(ErrorMessage.STATE_CONNECTION_UNABLE, "cannot open datasource '" + datasource + "': " + e.getMessage());
             return false;
         }
         s.helloPool(pool);

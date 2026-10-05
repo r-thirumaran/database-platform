@@ -68,7 +68,9 @@ public final class PoolManager implements AutoCloseable {
             PoolSettings settings = new PoolSettings(template.databaseKey(), template.datasourceName(),
                     template.datasourceId(), template.databaseId(), template.engineHint(), template.jdbcUrl(),
                     material.username() != null ? material.username() : template.username(), material.secret(),
-                    template.credentialId(), material.version() > 0 ? material.version() : template.credentialVersion(),
+                    // the pool is registered under the template's key: its version must match that key, otherwise a
+                    // later refresh of the resolution creates a second live pool for the same credential
+                    template.credentialId(), template.credentialVersion(),
                     template.maxConnections(), template.minIdle(), template.connectionTimeoutMs(), template.idleTimeoutMs(),
                     template.maxLifetimeMs(), template.statementTimeoutSeconds(), template.validationQuery(),
                     template.jdbcProperties(), template.poolMode());
@@ -95,8 +97,8 @@ public final class PoolManager implements AutoCloseable {
     public void sweep() {
         for (PhysicalPool p : pools.values()) {
             if (p.isDraining() && p.closeIfDrained()) {
+                // the per-key lock is kept on purpose: removing it would let two threads create a pool for the same key
                 pools.remove(p.key(), p);
-                locks.remove(p.key());
             }
         }
     }

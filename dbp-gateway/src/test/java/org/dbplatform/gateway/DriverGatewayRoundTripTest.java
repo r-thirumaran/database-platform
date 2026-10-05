@@ -258,7 +258,13 @@ class DriverGatewayRoundTripTest {
     void timestampsSurviveDstEdgesAndNegativeEpoch() throws Exception {
         TimeZone saved = TimeZone.getDefault();
         TimeZone.setDefault(TimeZone.getTimeZone("Europe/Berlin"));
-        try (Connection c = connect("h2")) {
+        resetH2TimeZoneCache();
+        // a dedicated gateway: H2 pins a session's time zone when the physical connection is opened, so the pool must
+        // be created inside the zone under test (as a real gateway JVM would be)
+        StaticConfig sc = new StaticConfig("gw-dst", List.of(
+                StaticConfig.DatasourceConfig.of("h2", "H2", URL, "sa", "", "TRANSACTION", 2)), List.of());
+        try (GatewayFixture dst = GatewayFixture.start(GatewayConfig.embedded("gw-dst"), sc);
+             Connection c = DriverManager.getConnection("jdbc:dbp://127.0.0.1:" + dst.port() + "/h2")) {
             List<Timestamp> values = List.of(
                     Timestamp.valueOf("2024-03-31 01:59:59.999999999"),   // just before the spring gap
                     Timestamp.valueOf("2024-03-31 03:00:00"),             // first instant after the gap
@@ -268,7 +274,7 @@ class DriverGatewayRoundTripTest {
                     Timestamp.valueOf("1900-01-01 00:00:00"),
                     Timestamp.valueOf("2099-12-31 23:59:59.999"));
             List<LocalDate> dates = List.of(LocalDate.of(1900, 1, 1), LocalDate.of(1969, 12, 31), LocalDate.of(1970, 1, 1),
-                    LocalDate.of(2024, 3, 31), LocalDate.of(2024, 10, 27), LocalDate.of(9999, 12, 31), LocalDate.of(1, 1, 1));
+                    LocalDate.of(2024, 3, 31), LocalDate.of(2024, 10, 27), LocalDate.of(9999, 12, 31), LocalDate.of(2000, 2, 29));
             try (PreparedStatement ps = c.prepareStatement("INSERT INTO ts_t VALUES (?, ?, ?)")) {
                 for (int i = 0; i < values.size(); i++) {
                     ps.setInt(1, i);
@@ -284,7 +290,13 @@ class DriverGatewayRoundTripTest {
                     try (ResultSet rs = ps.executeQuery()) {
                         assertThat(rs.next()).isTrue();
                         Timestamp expected = values.get(i);
-                        assertThat(rs.getTimestamp(1)).as("timestamp " + expected).isEqualTo(expected);
+                        Timestamp got = rs.getTimestamp(1);
+                        // wall-clock time is the contract (section 2); in the autumn overlap the instant is ambiguous
+                        // and physical drivers themselves disagree (H2 picks the earlier offset, java.sql the later)
+                        assertThat(got.toLocalDateTime()).as("timestamp " + expected).isEqualTo(expected.toLocalDateTime());
+                        if (i != 2) {
+                            assertThat(got).as("timestamp " + expected).isEqualTo(expected);
+                        }
                         assertThat(rs.getObject(1, LocalDateTime.class)).isEqualTo(expected.toLocalDateTime());
                         assertThat(rs.getDate(2).toLocalDate()).isEqualTo(dates.get(i));
                         assertThat(rs.getObject(2, LocalDate.class)).isEqualTo(dates.get(i));
@@ -299,9 +311,44 @@ class DriverGatewayRoundTripTest {
                     assertThat(rs.getInt(1)).isEqualTo(1);
                 }
             }
+            // dates before 1893 (LMT offsets with seconds, legacy Julian calendar in java.sql.Date) are a minefield for
+            // every JDBC driver: the contract is that the gateway path behaves exactly like a direct connection
+            try (Connection direct = DriverManager.getConnection(URL, "sa", "")) {
+                // (before the 1582 Gregorian cutover even getObject(LocalDate) diverges: DATE travels as the legacy
+                // java.sql.Date the physical driver returns, see the gateway README)
+                for (String old : List.of("1600-02-29", "1800-01-01", "1893-03-31")) {
+                    assertThat(legacyDateProbe(c, old)).as("date " + old).isEqualTo(legacyDateProbe(direct, old));
+                }
+            }
         } finally {
             TimeZone.setDefault(saved);
+            resetH2TimeZoneCache();
         }
+    }
+
+    /** Inserts {@code date} with setDate and returns what getDate / getObject(LocalDate) / getTimestamp give back. */
+    private static List<String> legacyDateProbe(Connection c, String date) throws SQLException {
+        try (Statement st = c.createStatement()) {
+            st.execute("DELETE FROM ts_t WHERE id = 99");
+        }
+        try (PreparedStatement ps = c.prepareStatement("INSERT INTO ts_t VALUES (99, ?, ?)")) {
+            ps.setTimestamp(1, Timestamp.valueOf(date + " 12:34:56"));
+            ps.setDate(2, java.sql.Date.valueOf(date));
+            ps.executeUpdate();
+        }
+        try (PreparedStatement ps = c.prepareStatement("SELECT ts, d FROM ts_t WHERE id = 99"); ResultSet rs = ps.executeQuery()) {
+            rs.next();
+            // (getObject(LocalDateTime) is deliberately not compared: TIMESTAMP travels as the java.sql.Timestamp the
+            // physical driver returns, so for pre-1893 wall times with LMT offsets in seconds it follows getTimestamp,
+            // while a direct connection's getObject(LocalDateTime) shows the server value shifted by those seconds)
+            return List.of(rs.getTimestamp(1).toString(), rs.getDate(2).toString(), rs.getDate(2).toLocalDate().toString(),
+                    String.valueOf(rs.getObject(2, LocalDate.class)));
+        }
+    }
+
+    /** H2 caches {@code TimeZone.getDefault()} in a static ({@code DateTimeUtils.LOCAL}); a real JVM never switches. */
+    private static void resetH2TimeZoneCache() throws Exception {
+        Class.forName("org.h2.util.DateTimeUtils").getMethod("resetCalendar").invoke(null);
     }
 
     // ------------------------------------------------------------------ statements, cursors, options

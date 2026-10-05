@@ -48,6 +48,7 @@ class PostgresGatewayTest {
                     + " BEGIN OPEN c FOR SELECT id, name FROM orders ORDER BY id; RETURN c; END $$ LANGUAGE plpgsql");
             st.execute("CREATE PROCEDURE bump(INOUT x integer) AS $$ BEGIN x := x * 2; END $$ LANGUAGE plpgsql");
             st.execute("CREATE TABLE load_t (id serial PRIMARY KEY, v integer)");
+            st.execute("CREATE TABLE typed_t (id uuid PRIMARY KEY, doc jsonb, created timestamptz, t time(3))");
         }
         gw = GatewayFixture.start("gw-pg", List.of(
                 StaticConfig.DatasourceConfig.of("pg", "POSTGRES", pg.jdbcUrl(DB), "postgres", "postgres", "TRANSACTION", 5)
@@ -242,6 +243,25 @@ class PostgresGatewayTest {
         assertThat(total).isEqualTo(sessions * perSession);
         assertThat(maxPool.get()).isLessThanOrEqualTo(5);
         assertThat(maxBackends.get()).as("PostgreSQL backends opened by the gateway").isLessThanOrEqualTo(5);
+    }
+
+    @Test
+    void stringTaggedValuesBindToUuidAndJsonbColumns() {
+        // UUID / JSON travel as STRING (section 2); without stringtype=unspecified PostgreSQL answers 42804
+        try (TestClient c = gw.client("pg")) {
+            String id = "123e4567-e89b-12d3-a456-426614174000";
+            java.time.OffsetDateTime created = java.time.OffsetDateTime.of(2024, 2, 29, 13, 45, 30, 123456000, java.time.ZoneOffset.ofHours(2));
+            java.time.LocalTime t = java.time.LocalTime.of(23, 59, 58, 123_000_000);
+            assertThat(c.update("INSERT INTO typed_t VALUES (?, ?, ?, ?)", id, "{\"a\": 1}", created, t).updateCount()).isEqualTo(1);
+            TestClient.ResultItem r = c.query("SELECT id, doc ->> 'a', created, t FROM typed_t WHERE id = ?", id).result();
+            assertThat(r.rows()).hasSize(1);
+            assertThat(r.cell(0, 0).toString()).isEqualTo(id);
+            assertThat(r.cell(0, 1)).isEqualTo("1");
+            assertThat(((java.time.OffsetDateTime) r.cell(0, 2)).toInstant()).isEqualTo(created.toInstant());
+            assertThat(r.cell(0, 3)).as("TIME keeps its millis").isEqualTo(t);
+            assertThat(c.query("SELECT count(*) FROM typed_t WHERE doc @> ?::jsonb", "{\"a\": 1}").scalar()).isEqualTo(1L);
+            c.update("DELETE FROM typed_t");
+        }
     }
 
     @Test

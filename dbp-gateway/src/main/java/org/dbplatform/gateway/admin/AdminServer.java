@@ -116,7 +116,7 @@ public final class AdminServer implements AutoCloseable {
             m.put("key", p.key());
             m.put("datasources", p.datasourceNames());
             m.put("engine", p.engine());
-            m.put("jdbcUrl", p.settings().jdbcUrl());
+            m.put("jdbcUrl", maskSecrets(p.settings().jdbcUrl()));
             m.put("username", p.settings().username());
             m.put("credentialVersion", p.settings().credentialVersion());
             m.put("poolMode", p.settings().poolMode());
@@ -158,6 +158,11 @@ public final class AdminServer implements AutoCloseable {
             out.add(m);
         }
         return out;
+    }
+
+    /** Masks {@code password=...}-style values a DBA may have embedded in a physical JDBC URL. */
+    static String maskSecrets(String url) {
+        return url == null ? null : url.replaceAll("(?i)(password|pwd|secret)(\\s*=\\s*)[^;&)]*", "$1$2***");
     }
 
     // ------------------------------------------------------------------ http helpers

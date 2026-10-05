@@ -103,6 +103,9 @@ public final class PhysicalPool {
             case POSTGRES -> {
                 props.putIfAbsent("ApplicationName", program);
                 props.putIfAbsent("connectTimeout", String.valueOf(Math.max(1, (s.connectionTimeoutMs() + 999) / 1000)));
+                // the wire protocol carries UUID, JSON/JSONB, enums, intervals, ... as STRING and the gateway binds them
+                // with setString: let the server infer the parameter type instead of forcing varchar (42804 otherwise)
+                props.putIfAbsent("stringtype", "unspecified");
             }
             case MSSQL -> {
                 props.putIfAbsent("applicationName", program);

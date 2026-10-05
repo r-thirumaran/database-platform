@@ -17,7 +17,8 @@ public final class SessionSettings {
     private String schema;
     private String catalog;
     private int networkTimeoutMillis = UNSET;
-    private final Map<String, String> clientInfo = new LinkedHashMap<>();
+    // read by the admin endpoint and telemetry while the handler thread mutates it
+    private final Map<String, String> clientInfo = new java.util.concurrent.ConcurrentHashMap<>();
 
     public boolean autoCommit() {
         return autoCommit;

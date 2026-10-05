@@ -35,6 +35,8 @@ public final class ControlPlaneResolver implements Resolver {
     public static final Duration NEGATIVE_AUTH_TTL = Duration.ofSeconds(5);
     /** Safety net so a resolution never outlives this even if version polling fails silently. */
     public static final Duration RESOLUTION_MAX_AGE = Duration.ofMinutes(10);
+    /** Upper bound of cached api keys (a flood of invalid keys must not grow the heap). */
+    static final int MAX_AUTH_ENTRIES = 10_000;
 
     private record AuthEntry(ApplicationIdentity identity, AuthException failure, long expiresAt) {
         boolean expired() {
@@ -189,6 +191,11 @@ public final class ControlPlaneResolver implements Resolver {
         if (cached != null && !cached.stale()) {
             return cached.resolution();
         }
+        if (!reachable) {
+            // refresh runs on the data path (every pin): while the poller reports the control plane down, serve what
+            // we have instead of paying an HTTP timeout per transaction; the poller flips reachable back on recovery
+            return cached != null ? cached.resolution() : previous;
+        }
         try {
             DatasourceResolution r = client.resolveDatasource(previous.datasource().name(), previous.identity().applicationId());
             if (r == null || r.database() == null) {
@@ -202,8 +209,11 @@ public final class ControlPlaneResolver implements Resolver {
             onConfigVersion(r.configVersion());
             return res;
         } catch (ControlPlaneException e) {
+            if (!e.isForbidden() && !e.isNotFound() && e.status() != 401) {
+                reachable = false;
+            }
             LOG.debug("refresh of {} failed ({}), keeping previous resolution", key, e.getMessage());
-            return previous;
+            return cached != null ? cached.resolution() : previous;
         }
     }
 
@@ -221,12 +231,12 @@ public final class ControlPlaneResolver implements Resolver {
                 throw AuthException.rejected("invalid api key");
             }
             reachable = true;
-            authCache.put(apiKey, new AuthEntry(id, null, System.nanoTime() + authTtl.toNanos()));
+            cacheAuth(apiKey, new AuthEntry(id, null, System.nanoTime() + authTtl.toNanos()));
             return id;
         } catch (ControlPlaneException e) {
             if (e.isUnauthorized() || e.isForbidden() || e.isNotFound() || e.status() == 400) {
                 AuthException failure = AuthException.rejected("invalid api key");
-                authCache.put(apiKey, new AuthEntry(null, failure, System.nanoTime() + NEGATIVE_AUTH_TTL.toNanos()));
+                cacheAuth(apiKey, new AuthEntry(null, failure, System.nanoTime() + NEGATIVE_AUTH_TTL.toNanos()));
                 throw failure;
             }
             if (entry != null && entry.identity() != null) {
@@ -236,6 +246,16 @@ public final class ControlPlaneResolver implements Resolver {
             reachable = false;
             throw AuthException.unreachable("control plane unavailable while authenticating: " + e.getMessage(), e);
         }
+    }
+
+    private void cacheAuth(String apiKey, AuthEntry entry) {
+        if (authCache.size() >= MAX_AUTH_ENTRIES) {
+            authCache.entrySet().removeIf(e -> e.getValue().expired());
+            if (authCache.size() >= MAX_AUTH_ENTRIES && entry.failure() != null) {
+                return; // keep the positive entries; a flood of invalid keys is simply not cached any more
+            }
+        }
+        authCache.put(apiKey, entry);
     }
 
     static SessionResolution toResolution(ApplicationIdentity app, String datasourceName, DatasourceResolution r) {

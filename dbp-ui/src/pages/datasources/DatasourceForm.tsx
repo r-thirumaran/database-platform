@@ -18,7 +18,7 @@ export function DatasourceForm({ initial, onSubmit, busy, onCancel }: { initial?
   return (
     <form onSubmit={(e) => { e.preventDefault(); onSubmit(v); }}>
       <div className="form-grid">
-        <Field label="Name" help="Logical name used in jdbc:dbp://…/<name> and as proxy service alias.">{(id) => <input id={id} className="input" required pattern="[a-z0-9][a-z0-9-]*" value={v.name} onChange={(e) => set('name', e.target.value)} placeholder="sales" />}</Field>
+        <Field label="Name" help="Logical name used in jdbc:dbp://…/<name> and as proxy service alias.">{(id) => <input id={id} className="input" required pattern="[a-z0-9][a-z0-9\-]*" value={v.name} onChange={(e) => set('name', e.target.value)} placeholder="sales" />}</Field>
         <Field label="Display name">{(id) => <input id={id} className="input" value={v.displayName} onChange={(e) => set('displayName', e.target.value)} />}</Field>
         <Field label="Owner team">{(id) => (
           <select id={id} className="input" value={v.ownerTeamId ?? ''} onChange={(e) => set('ownerTeamId', e.target.value || null)}>

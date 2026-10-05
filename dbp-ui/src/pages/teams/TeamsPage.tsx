@@ -20,7 +20,7 @@ export function TeamForm({ initial, onSubmit, busy, onCancel }: { initial?: Team
   return (
     <form onSubmit={(e) => { e.preventDefault(); onSubmit(v); }}>
       <div className="form-grid">
-        <Field label="Name">{(id) => <input id={id} className="input" required pattern="[a-z0-9][a-z0-9-]*" value={v.name} onChange={(e) => setV({ ...v, name: e.target.value })} placeholder="sales-platform" />}</Field>
+        <Field label="Name">{(id) => <input id={id} className="input" required pattern="[a-z0-9][a-z0-9\-]*" value={v.name} onChange={(e) => setV({ ...v, name: e.target.value })} placeholder="sales-platform" />}</Field>
         <Field label="Display name">{(id) => <input id={id} className="input" required value={v.displayName} onChange={(e) => setV({ ...v, displayName: e.target.value })} />}</Field>
         <Field label="Contacts" full>{(id) => <ChipInput id={id} value={v.contacts} onChange={(c) => setV({ ...v, contacts: c })} placeholder="team@example.org, #channel" />}</Field>
         <Field label="Tags" full>{(id) => <ChipInput id={id} value={v.tags} onChange={(t) => setV({ ...v, tags: t })} placeholder="domain:sales" />}</Field>

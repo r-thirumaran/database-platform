@@ -152,6 +152,21 @@ class H2GatewayTest {
         }
     }
 
+    @Test
+    void oversizedHelloFrameIsRejectedBeforeAllocation() throws Exception {
+        try (Socket s = new Socket("127.0.0.1", gw.port())) {
+            // a frame claiming 32 MiB: within DBP_GATEWAY_MAX_FRAME_BYTES but far beyond what a HELLO may use
+            java.io.DataOutputStream out = new java.io.DataOutputStream(s.getOutputStream());
+            out.writeInt(32 * 1024 * 1024);
+            out.writeByte(MessageType.HELLO.code());
+            out.flush();
+            ErrorMessage e = (ErrorMessage) Messages.read(new org.dbplatform.protocol.FrameReader(s.getInputStream()));
+            assertThat(e.fatal()).isTrue();
+            assertThat(e.sqlState()).isEqualTo("HY000");
+            assertThat(e.message()).contains("exceeds maximum");
+        }
+    }
+
     // ------------------------------------------------------------------ values
 
     @Test

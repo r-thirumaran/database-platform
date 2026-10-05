@@ -161,7 +161,7 @@ test('datasources: pool policy, routing rules, grants, switch with impact, migra
   await expect(sd.getByRole('link', { name: 'orders-service' })).toBeVisible();
   await expect(sd.getByText('Teams to notify')).toBeVisible();
   await expect(sd.getByText('Tables routed through this datasource')).toBeVisible();
-  await expect(sd.getByRole('link', { name: 'SALES.ORDERS' })).toBeVisible();
+  await expect(sd.getByRole('link', { name: 'SALES.ORDERS', exact: true })).toBeVisible();
   const confirm = sd.getByRole('button', { name: 'Switch now' });
   await sd.getByLabel('Target database').selectOption(pg.id);
   await expect(confirm).toBeDisabled();
@@ -170,8 +170,9 @@ test('datasources: pool policy, routing rules, grants, switch with impact, migra
   await expect(confirm).toBeEnabled();
   await confirm.click();
   await expectToast(page, /now routes to sales-postgres/);
-  await expect(region(page, 'Migration events').locator('li').filter({ hasText: 'e2e switch' })).toBeVisible();
-  await expect(region(page, 'Migration events').locator('li').filter({ hasText: 'e2e switch' })).toContainText('sales-postgres');
+  const newest = region(page, 'Migration events').locator('li').first(); // timeline is newest first
+  await expect(newest).toContainText('e2e switch');
+  await expect(newest).toContainText('sales-postgres');
   await expect(region(page, 'Routing')).toContainText('sales-postgres');
   // switch back through the same dialog
   await page.getByRole('button', { name: 'Switch database' }).click();
@@ -205,12 +206,13 @@ test('applications: summary, api keys, identity rules, access, grants', async ({
   await expect(region(page, 'Routines called')).toContainText('ORDER_PKG');
 
   // api keys: plaintext once, then revoke
-  await page.getByLabel('API key label').fill('e2e-key');
+  const keyLabel = `e2e-key-${Date.now()}`;
+  await page.getByLabel('API key label').fill(keyLabel);
   await page.getByRole('button', { name: 'Create key' }).click();
   await expect(dialog(page).getByText(/^dbp_[A-Za-z0-9]+_[A-Za-z0-9]+$/)).toBeVisible();
   await dialog(page).getByRole('button', { name: 'I have stored it' }).click();
   const keys = region(page, 'API keys');
-  const krow = keys.locator('tbody tr').filter({ hasText: 'e2e-key' }).first();
+  const krow = keys.locator('tbody tr').filter({ hasText: keyLabel }).first();
   await expect(krow).toBeVisible();
   await krow.getByRole('button', { name: 'Revoke' }).click();
   await dialog(page).getByRole('button', { name: 'Revoke' }).click();
@@ -218,7 +220,7 @@ test('applications: summary, api keys, identity rules, access, grants', async ({
   await expect(krow.getByText('revoked')).toBeVisible();
 
   // identity rules: add a CIDR, save (full PUT), remove it again
-  const cidr = page.getByLabel('10.20.0.0/16');
+  const cidr = page.getByLabel('10.20.0.0/16', { exact: true });
   await cidr.fill('192.0.2.0/24');
   await cidr.press('Enter');
   await page.getByRole('button', { name: 'Save rules' }).click();
@@ -247,7 +249,7 @@ test('teams: list and summary', async ({ page }, testInfo) => {
   await expect(heading(page)).toContainText('Sales Platform Team');
   await expect(page.getByText('Owned tables').first()).toBeVisible();
   await expect(region(page, 'Applications').getByRole('link', { name: 'orders-service' })).toBeVisible();
-  await expect(region(page, 'Owned tables').getByRole('link', { name: 'SALES.ORDERS' })).toBeVisible();
+  await expect(region(page, 'Owned tables').getByRole('link', { name: 'SALES.ORDERS', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   await dialog(page).getByRole('button', { name: 'Save' }).click();
   await expectToast(page, 'Saved');
@@ -263,17 +265,24 @@ test('tables: filters, paging, detail with ownership, producer, columns, migrati
   await page.goto('/tables');
   await expect(heading(page)).toHaveText('Tables');
   await page.getByLabel('Database').selectOption(oracle.id);
+  await expect(page).toHaveURL(/databaseId=/);
+  await expect(page.locator('select#tbl-schema')).toBeVisible(); // becomes a select once a database is chosen
   await page.getByLabel('Schema').selectOption('SALES');
-  await expect(page.getByRole('link', { name: 'SALES.ORDERS' })).toBeVisible();
+  await expect(page).toHaveURL(/schema=SALES/);
+  await expect(page.getByRole('link', { name: 'SALES.ORDERS', exact: true })).toBeVisible();
   await page.getByLabel('Classification').selectOption('PII');
-  await expect(page.getByRole('link', { name: 'SALES.CUSTOMER' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'SALES.ORDERS' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'SALES.CUSTOMER', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'SALES.ORDERS', exact: true })).toHaveCount(0);
   await page.getByLabel('Classification').selectOption('');
-  await page.getByLabel('Unowned only').check();
-  await expect(page.getByText(/No tables match|tables · page/)).toBeVisible();
-  await page.getByLabel('Unowned only').uncheck();
+  // the checkbox is bound to the URL (?unowned=true); React Router applies the navigation in a transition
+  await page.getByLabel('Unowned only').click();
+  await expect(page.getByLabel('Unowned only')).toBeChecked();
+  await expect(page).toHaveURL(/unowned=true/);
+  await expect(page.getByText(/No tables match|tables · page/).first()).toBeVisible();
+  await page.getByLabel('Unowned only').click();
+  await expect(page.getByLabel('Unowned only')).not.toBeChecked();
   await page.getByLabel('Search').fill('order');
-  await expect(page.getByRole('link', { name: 'SALES.ORDER_ITEM' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'SALES.ORDER_ITEM', exact: true })).toBeVisible();
   await page.getByLabel('Search').fill('');
   await expect(page.getByText(/\d+ tables · page 1 of \d+/)).toBeVisible();
   const next = page.getByRole('button', { name: 'Next' });
@@ -283,7 +292,7 @@ test('tables: filters, paging, detail with ownership, producer, columns, migrati
     await page.getByRole('button', { name: 'Previous' }).click();
   }
 
-  await page.getByRole('link', { name: 'SALES.ORDERS' }).click();
+  await page.getByRole('link', { name: 'SALES.ORDERS', exact: true }).click();
   await expect(heading(page)).toContainText('SALES.ORDERS');
   await expect(region(page, 'Consumers').locator('tbody tr').first()).toBeVisible();
   await expect(region(page, 'Database-side dependencies')).toContainText('TRG_ORDERS_AUDIT');
@@ -351,20 +360,20 @@ test('routines: filters and detail with callers, dependencies and referenced-by'
   await page.goto('/routines');
   await expect(heading(page)).toHaveText('Routines');
   await page.getByLabel('Kind').selectOption('TRIGGER');
-  await expect(page.getByRole('link', { name: 'SALES.TRG_ORDERS_AUDIT' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'SALES.ORDER_PKG.PLACE_ORDER' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'SALES.TRG_ORDERS_AUDIT', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'SALES.ORDER_PKG.PLACE_ORDER', exact: true })).toHaveCount(0);
   await page.getByLabel('Kind').selectOption('');
   await page.getByLabel('Search').fill('place_order');
-  await expect(page.getByRole('link', { name: 'SALES.ORDER_PKG.PLACE_ORDER' })).toBeVisible();
-  await page.getByRole('link', { name: 'SALES.ORDER_PKG.PLACE_ORDER' }).click();
+  await expect(page.getByRole('link', { name: 'SALES.ORDER_PKG.PLACE_ORDER', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'SALES.ORDER_PKG.PLACE_ORDER', exact: true }).click();
   await expect(heading(page)).toContainText('PLACE_ORDER');
   await expect(region(page, 'Callers').getByRole('link', { name: 'orders-service' })).toBeVisible();
-  await expect(region(page, 'Dependencies').getByRole('link', { name: 'SALES.ORDERS' })).toBeVisible();
-  await expect(region(page, 'Tables touched').getByRole('link', { name: 'SALES.ORDERS' })).toBeVisible();
+  await expect(region(page, 'Dependencies').getByRole('link', { name: 'SALES.ORDERS', exact: true })).toBeVisible();
+  await expect(region(page, 'Tables touched').getByRole('link', { name: 'SALES.ORDERS', exact: true })).toBeVisible();
   await page.goto('/routines?kind=TRIGGER');
-  await page.getByRole('link', { name: 'SALES.TRG_ORDERS_AUDIT' }).click();
-  await expect(region(page, 'Referenced by').getByRole('link', { name: 'SALES.ORDERS' })).toBeVisible();
-  await expect(region(page, 'Dependencies').getByRole('link', { name: 'SALES.AUDIT_LOG' })).toBeVisible();
+  await page.getByRole('link', { name: 'SALES.TRG_ORDERS_AUDIT', exact: true }).click();
+  await expect(region(page, 'Referenced by').getByRole('link', { name: 'SALES.ORDERS', exact: true })).toBeVisible();
+  await expect(region(page, 'Dependencies').getByRole('link', { name: 'SALES.AUDIT_LOG', exact: true })).toBeVisible();
   await w.assertClean();
 });
 

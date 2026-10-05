@@ -52,8 +52,10 @@ public final class StaticResolver implements Resolver {
                 throw AuthException.rejected("apiKey is required for datasource '" + datasource + "'");
             }
             StaticConfig.ApplicationConfig app = null;
+            byte[] presented = apiKey.getBytes(java.nio.charset.StandardCharsets.UTF_8);
             for (StaticConfig.ApplicationConfig a : config.applications()) {
-                if (apiKey.equals(a.apiKey())) {
+                if (a.apiKey() != null && java.security.MessageDigest.isEqual(presented,
+                        a.apiKey().getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
                     app = a;
                     break;
                 }

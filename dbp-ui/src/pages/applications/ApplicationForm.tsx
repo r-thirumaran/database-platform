@@ -16,7 +16,7 @@ export function ApplicationForm({ initial, onSubmit, busy, onCancel }: { initial
   return (
     <form onSubmit={(e) => { e.preventDefault(); onSubmit({ ...v, identityRules: { ...v.identityRules, serviceAliases: v.identityRules.serviceAliases.length || !v.name ? v.identityRules.serviceAliases : [v.name] } }); }}>
       <div className="form-grid">
-        <Field label="Name" help="Stable identifier; also the default service alias.">{(id) => <input id={id} className="input" required pattern="[a-z0-9][a-z0-9-]*" value={v.name} onChange={(e) => set('name', e.target.value)} placeholder="orders-service" />}</Field>
+        <Field label="Name" help="Stable identifier; also the default service alias.">{(id) => <input id={id} className="input" required pattern="[a-z0-9][a-z0-9\-]*" value={v.name} onChange={(e) => set('name', e.target.value)} placeholder="orders-service" />}</Field>
         <Field label="Display name">{(id) => <input id={id} className="input" value={v.displayName} onChange={(e) => set('displayName', e.target.value)} />}</Field>
         <Field label="Team">{(id) => <select id={id} className="input" value={v.teamId ?? ''} onChange={(e) => set('teamId', e.target.value || null)}><option value="">— none —</option>{teams.data?.map((t) => <option key={t.id} value={t.id}>{t.displayName}</option>)}</select>}</Field>
         <Field label="Kind">{(id) => <select id={id} className="input" value={v.kind} onChange={(e) => set('kind', e.target.value as ApplicationKind)}>{['SERVICE', 'BATCH', 'UI', 'LEGACY', 'TOOL'].map((k) => <option key={k}>{k}</option>)}</select>}</Field>

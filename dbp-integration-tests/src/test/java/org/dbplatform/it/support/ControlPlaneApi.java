@@ -69,6 +69,11 @@ public final class ControlPlaneApi {
         return send(request(path).POST(bodyOf(body)), false);
     }
 
+    /** {@code POST /api/v1 + path} with the service token. */
+    public Response internalPost(String path, Object body) {
+        return send(request(path).POST(bodyOf(body)), true);
+    }
+
     public Response put(String path, Object body) {
         return send(request(path).PUT(bodyOf(body)), false);
     }

@@ -177,7 +177,8 @@ Downgraded with a `SQLWarning` (SQLState `01S02`) so framework defaults keep wor
   `first`, `last`, `beforeFirst`, `afterLast` on any result set) and updatable result sets
   (`CONCUR_UPDATABLE`, `updateXxx`, `insertRow`, `deleteRow`, …).
 * Streaming LOBs: values are materialised in the frame (`maxFrameBytes`, 64 MiB default); `Blob`/`Clob`
-  objects are in-memory copies (`locatorsUpdateCopy() = true`).
+  objects are in-memory copies (`locatorsUpdateCopy() = true`). PostgreSQL large objects (`oid` columns, e.g.
+  Hibernate `@Lob` on PostgreSQL) are not supported: `setBlob`/`setClob` bind the bytes/text (`bytea`/`text`).
 * Vendor unwrapping (`unwrap(OracleConnection.class)` …): `isWrapperFor` is `true` only for the driver's own
   types; the physical connection lives in the gateway.
 * `createArrayOf`, `createStruct`, `createSQLXML`, `setArray`, `setRef`, `setRowId`, `setSQLXML`,
@@ -204,6 +205,9 @@ Downgraded with a `SQLWarning` (SQLState `01S02`) so framework defaults keep wor
   non-holdable cursors) — read everything before committing.
 * **Threads**: JDBC objects of one connection may be used from several threads; all wire I/O is serialised
   on a per-connection lock, requests are strictly sequential.
+* **Errors in the middle of a result**: when the gateway answers ERROR after it already streamed result items of
+  the same execution, the driver raises the error and closes the server-side cursors of those items (CLOSE_CURSOR),
+  so a failed statement never leaves the session pinned.
 * **Connection loss**: any I/O error, socket timeout or protocol violation closes the connection; every
   subsequent call throws `SQLNonTransientConnectionException` and `isClosed()` is `true`. Pools detect this
   through `isValid`.

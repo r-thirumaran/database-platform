@@ -726,6 +726,11 @@ public final class LogicalSession {
         return List.copyOf(cursors.values());
     }
 
+    /** Ids of the currently open cursors. */
+    public java.util.Set<Integer> cursorIds() {
+        return java.util.Set.copyOf(cursors.keySet());
+    }
+
     // ------------------------------------------------------------------ lifecycle
 
     /** Closes the logical session: rollback if needed, reset the physical connection and return it to the pool. */

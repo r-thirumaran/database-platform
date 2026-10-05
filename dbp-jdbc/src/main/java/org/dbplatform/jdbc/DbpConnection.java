@@ -4,6 +4,7 @@ import org.dbplatform.jdbc.transport.Transport;
 import org.dbplatform.protocol.JdbcUrl;
 import org.dbplatform.protocol.ProtocolConstants;
 import org.dbplatform.protocol.messages.Close;
+import org.dbplatform.protocol.messages.CloseCursor;
 import org.dbplatform.protocol.messages.Commit;
 import org.dbplatform.protocol.messages.ErrorMessage;
 import org.dbplatform.protocol.messages.Hello;
@@ -13,7 +14,9 @@ import org.dbplatform.protocol.messages.Ok;
 import org.dbplatform.protocol.messages.Ping;
 import org.dbplatform.protocol.messages.Pong;
 import org.dbplatform.protocol.messages.ReleaseSavepoint;
+import org.dbplatform.protocol.messages.ResultSetHeader;
 import org.dbplatform.protocol.messages.Rollback;
+import org.dbplatform.protocol.messages.Rows;
 import org.dbplatform.protocol.messages.SavepointSet;
 import org.dbplatform.protocol.messages.SetAutoCommit;
 import org.dbplatform.protocol.messages.SetCatalog;
@@ -255,9 +258,32 @@ public final class DbpConnection extends DbpWrapper implements Connection {
         }
         Message last = replies.get(replies.size() - 1);
         if (last instanceof ErrorMessage err) {
+            if (!err.fatal()) {
+                closeOrphanedCursors(replies);
+            }
             throw DbpSqlExceptions.fromError(err, this);
         }
         return replies;
+    }
+
+    /**
+     * An ERROR that terminates an EXECUTE sequence after result items were streamed leaves those cursors open on
+     * the gateway (and the session pinned) unless they are closed: the application never sees them.
+     */
+    private void closeOrphanedCursors(List<Message> replies) {
+        for (int i = 0; i + 1 < replies.size(); i++) {
+            if (replies.get(i) instanceof ResultSetHeader h && replies.get(i + 1) instanceof Rows rows
+                    && rows.cursorId() == h.cursorId() && !rows.last()) {
+                try {
+                    transport.call(new CloseCursor(h.cursorId()), -1);
+                } catch (SQLException e) {
+                    if (LOG.isLoggable(Level.FINE)) {
+                        LOG.fine("CLOSE_CURSOR " + h.cursorId() + " after failed EXECUTE: " + e.getMessage());
+                    }
+                    return;
+                }
+            }
+        }
     }
 
     Message exchangeTerminal(Message request) throws SQLException {

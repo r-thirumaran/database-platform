@@ -1,9 +1,13 @@
 package org.dbplatform.jdbc;
 
+import org.dbplatform.protocol.ColumnMeta;
 import org.dbplatform.protocol.messages.CloseCursor;
+import org.dbplatform.protocol.messages.ErrorMessage;
 import org.dbplatform.protocol.messages.Execute;
 import org.dbplatform.protocol.messages.ExecuteBatch;
 import org.dbplatform.protocol.messages.Fetch;
+import org.dbplatform.protocol.messages.ResultSetHeader;
+import org.dbplatform.protocol.messages.Rows;
 import org.junit.jupiter.api.Test;
 
 import java.sql.BatchUpdateException;
@@ -245,6 +249,33 @@ class StatementTest extends GatewayTest {
             assertThatThrownBy(() -> s.executeUpdate("select 1 rows"))
                     .satisfies(e -> assertThat(((SQLException) e).getSQLState()).isEqualTo("07005"));
             // still usable afterwards
+            assertThat(s.executeQuery("select 1 rows").next()).isTrue();
+        }
+    }
+
+    @Test
+    void errorAfterStreamedRowsClosesTheOrphanedCursor() throws Exception {
+        gateway.setHandler((req, session) -> {
+            if (req instanceof Execute e && e.sql() != null && e.sql().toUpperCase().contains("PARTIAL")) {
+                List<ColumnMeta> cols = FakeGateway.EchoHandler.defaultColumns();
+                int cursor = session.newCursorId();
+                session.cursors.put(cursor, new FakeGateway.Cursor(cursor, cols, FakeGateway.EchoHandler.defaultRows(5)));
+                session.reply(new ResultSetHeader(cursor, cols),
+                        new Rows(cursor, FakeGateway.EchoHandler.defaultRows(1), false),
+                        new ErrorMessage("HY000", 0, "boom after the first batch", false));
+                return;
+            }
+            gateway.echo().handle(req, session);
+        });
+        try (Connection c = connect(); Statement s = c.createStatement()) {
+            assertThatThrownBy(() -> s.executeQuery("select partial"))
+                    .isInstanceOf(SQLException.class)
+                    .hasMessageContaining("boom");
+            // the cursor streamed before the ERROR is released: the gateway must not stay pinned by it
+            assertThat(gateway.last(CloseCursor.class).cursorId()).isEqualTo(1);
+            assertThat(gateway.sessions().get(0).cursors).isEmpty();
+            assertThat(s.getResultSet()).isNull();
+            assertThat(c.isClosed()).isFalse();
             assertThat(s.executeQuery("select 1 rows").next()).isTrue();
         }
     }

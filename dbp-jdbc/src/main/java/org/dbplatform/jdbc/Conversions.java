@@ -525,16 +525,35 @@ final class Conversions {
         return cal == null ? ZoneId.systemDefault() : cal.getTimeZone().toZoneId();
     }
 
+    /*
+     * Without a Calendar the java.sql types are built with the legacy bridges (Date.valueOf / Timestamp.valueOf), i.e.
+     * through the default zone and the Julian-Gregorian calendar of java.util.Date. That is symmetric to the gateway,
+     * which encodes java.sql.Date.toLocalDate() / Timestamp.toLocalDateTime() of what the physical driver returned, so
+     * a value survives the round trip exactly like it would on a direct connection (dates before 1582, the ambiguous
+     * hour of a DST overlap). With a Calendar the value is interpreted in that zone, as other drivers do.
+     */
+
     static java.sql.Date toDate(Object v, Calendar cal) throws SQLException {
         ZoneId zone = zoneOf(cal);
         LocalDate d = toLocalDate(v, zone);
-        return d == null ? null : new java.sql.Date(d.atStartOfDay(zone).toInstant().toEpochMilli());
+        if (d == null) {
+            return null;
+        }
+        return cal == null ? java.sql.Date.valueOf(d) : new java.sql.Date(d.atStartOfDay(zone).toInstant().toEpochMilli());
     }
 
     static java.sql.Time toTime(Object v, Calendar cal) throws SQLException {
         ZoneId zone = zoneOf(cal);
         LocalTime t = toLocalTime(v, zone);
-        return t == null ? null : new java.sql.Time(LocalDate.EPOCH.atTime(t).atZone(zone).toInstant().toEpochMilli());
+        if (t == null) {
+            return null;
+        }
+        return cal == null ? legacyTime(t) : new java.sql.Time(LocalDate.EPOCH.atTime(t).atZone(zone).toInstant().toEpochMilli());
+    }
+
+    /** {@code java.sql.Time} on 1970-01-01 in the default zone, keeping the milliseconds (Time.valueOf drops them). */
+    private static java.sql.Time legacyTime(LocalTime t) {
+        return new java.sql.Time(Timestamp.valueOf(LocalDate.EPOCH.atTime(t)).getTime());
     }
 
     static Timestamp toTimestamp(Object v, Calendar cal) throws SQLException {
@@ -554,7 +573,10 @@ final class Conversions {
             }
         }
         LocalDateTime ldt = toLocalDateTime(v, zone);
-        return ldt == null ? null : Timestamp.from(ldt.atZone(zone).toInstant());
+        if (ldt == null) {
+            return null;
+        }
+        return cal == null ? Timestamp.valueOf(ldt) : Timestamp.from(ldt.atZone(zone).toInstant());
     }
 
     // ---------------------------------------------------------------- getObject
@@ -564,8 +586,7 @@ final class Conversions {
         return switch (v) {
             case null -> null;
             case LocalDate d -> java.sql.Date.valueOf(d);
-            case LocalTime t -> new java.sql.Time(LocalDate.EPOCH.atTime(t).atZone(ZoneId.systemDefault())
-                    .toInstant().toEpochMilli());
+            case LocalTime t -> legacyTime(t);
             case LocalDateTime ldt -> Timestamp.valueOf(ldt);
             case byte[] b -> b.clone();
             default -> v;

@@ -111,6 +111,12 @@ public final class GatewayServer implements AutoCloseable {
                 break;
             } catch (IOException e) {
                 LOG.warn("accept failed: {}", e.toString());
+                try {
+                    Thread.sleep(50); // e.g. too many open files: do not spin
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
                 continue;
             }
             open.add(s);

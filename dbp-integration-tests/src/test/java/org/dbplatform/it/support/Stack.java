@@ -473,59 +473,85 @@ public final class Stack implements ExtensionContext.Store.CloseableResource {
             } else {
                 proxyMode = "static";
                 proxyPgPort = Ports.free();
-                Path yaml = work.resolve("proxy-static.yaml");
-                try {
-                    Files.writeString(yaml, """
-                            proxyId: %s
-                            listeners:
-                              - name: postgres-main
-                                engine: POSTGRES
-                                port: %d
-                                bindAddress: 127.0.0.1
-                                routes:
-                                  - match: sales
-                                    datasource: sales
-                                    datasourceId: %s
-                                    databaseId: %s
-                                    host: 127.0.0.1
-                                    port: %d
-                                    serviceName: sales
-                                    rewriteServiceName: true
-                            applications:
-                              - name: orders-service
-                                id: %s
-                                identityRules:
-                                  serviceAliases: [orders-service]
-                                  pgApplicationNames: [orders-service]
-                            """.formatted(PROXY_ID, proxyPgPort, id("ds", DS_SALES), id("db", DB_PG), pg.port(), id("app", ORDERS)));
-                } catch (IOException e) {
-                    throw new UncheckedIOException(e);
-                }
+                Path yaml = writeStaticProxyConfig(proxyPgPort);
                 env.put("DBP_PROXY_CONFIG", yaml.toString());
                 findings.add("port 5432 busy: proxy started in static mode on port " + proxyPgPort + " (control-plane mode pins PostgreSQL listeners to 5432)");
             }
             proxy = ManagedProcess.start("proxy", logs, work, env, List.of(javaBin(), "-Xmx160m", "-jar", jar.toString()));
             String adminUrl = "http://127.0.0.1:" + proxyAdminPort;
-            JsonNode health = Await.until("proxy health with a running POSTGRES listener", Duration.ofSeconds(90), () -> {
-                if (!proxy.isAlive()) {
-                    throw new Await.Fatal("proxy exited:\n" + proxy.tail(40));
+            JsonNode health;
+            try {
+                health = awaitProxyListener(adminUrl, Duration.ofSeconds(45));
+            } catch (AssertionError | Await.Fatal first) {
+                if (!"control-plane".equals(proxyMode)) {
+                    throw first;
                 }
-                try {
-                    ControlPlaneApi.Response r = cp.getAbsolute(adminUrl + "/health");
-                    if (!r.ok()) {
-                        return Optional.empty();
-                    }
-                    boolean pgRunning = ControlPlaneApi.stream(r.body().path("listeners"))
-                            .anyMatch(l -> "POSTGRES".equals(l.path("engine").asText()) && l.path("running").asBoolean());
-                    return pgRunning ? Optional.of(r.body()) : Optional.empty();
-                } catch (UncheckedIOException e) {
-                    return Optional.empty();
-                }
-            });
+                // the proxy could not apply the control plane's configuration: record the defect and continue in static mode
+                String reason = proxy.tail(200).lines().filter(l -> l.contains("cannot") || l.contains("ERROR")).map(l -> l.replaceAll("^\\S+ ", "")).findFirst().orElse(String.valueOf(first.getMessage()));
+                findings.add("proxy in control-plane mode never became healthy: " + reason + " -> restarted in static mode");
+                proxy.stop(Duration.ofSeconds(10));
+                proxyMode = "static-fallback";
+                proxyPgPort = Ports.free();
+                env.remove("DBP_CONTROL_PLANE_URL");
+                env.put("DBP_PROXY_CONFIG", writeStaticProxyConfig(proxyPgPort).toString());
+                proxy = ManagedProcess.start("proxy-static", logs, work, env, List.of(javaBin(), "-Xmx160m", "-jar", jar.toString()));
+                health = awaitProxyListener(adminUrl, Duration.ofSeconds(60));
+            }
             proxyPgPort = ControlPlaneApi.stream(health.path("listeners")).filter(l -> "POSTGRES".equals(l.path("engine").asText()))
                     .findFirst().map(l -> l.path("port").asInt()).orElse(proxyPgPort);
         }
         return new ProxyInfo(proxyMode, proxyPgPort, proxyAdminPort, "http://127.0.0.1:" + proxyAdminPort);
+    }
+
+    private JsonNode awaitProxyListener(String adminUrl, Duration timeout) {
+        return Await.until("proxy health with a running POSTGRES listener", timeout, () -> {
+            if (!proxy.isAlive()) {
+                throw new Await.Fatal("proxy exited:\n" + proxy.tail(40));
+            }
+            try {
+                ControlPlaneApi.Response r = cp.getAbsolute(adminUrl + "/health");
+                if (!r.ok()) {
+                    return Optional.empty();
+                }
+                boolean pgRunning = ControlPlaneApi.stream(r.body().path("listeners"))
+                        .anyMatch(l -> "POSTGRES".equals(l.path("engine").asText()) && l.path("running").asBoolean());
+                return pgRunning ? Optional.of(r.body()) : Optional.empty();
+            } catch (UncheckedIOException e) {
+                return Optional.empty();
+            }
+        });
+    }
+
+    private Path writeStaticProxyConfig(int listenPort) {
+        Path yaml = work.resolve("proxy-static.yaml");
+        try {
+            Files.writeString(yaml, """
+                    proxyId: %s
+                    listeners:
+                      - name: postgres-main
+                        engine: POSTGRES
+                        port: %d
+                        bindAddress: 127.0.0.1
+                        routes:
+                          - match: sales
+                            datasource: sales
+                            datasourceId: %s
+                            databaseId: %s
+                            host: 127.0.0.1
+                            port: %d
+                            serviceName: sales
+                            rewriteServiceName: true
+                    applications:
+                      - name: orders-service
+                        id: %s
+                        identityRules:
+                          serviceAliases: [orders-service]
+                          pgApplicationNames: [orders-service]
+                    """.formatted(PROXY_ID, listenPort, id("ds", DS_SALES), id("db", DB_PG), pg.port(), id("app", ORDERS)));
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return yaml;
     }
 
     // ------------------------------------------------------------------ H2 second engine (scenario 8)

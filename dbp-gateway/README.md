@@ -82,7 +82,7 @@ instance. Engine specific connection properties are added so DBAs can see the ga
 | Engine     | Properties set unless configured                                                               |
 |------------|------------------------------------------------------------------------------------------------|
 | Oracle     | `v$session.program=dbp-gateway/<gatewayId>`, `oracle.net.CONNECT_TIMEOUT`, `oracle.jdbc.ReadTimeout` (when a statement timeout is configured) |
-| PostgreSQL | `ApplicationName=dbp-gateway/<gatewayId>`, `connectTimeout`                                     |
+| PostgreSQL | `ApplicationName=dbp-gateway/<gatewayId>`, `connectTimeout`, `stringtype=unspecified` (UUID / JSON / enum parameters travel as STRING and must be inferred by the server) |
 | SQL Server | `applicationName=dbp-gateway/<gatewayId>`, `loginTimeout`                                       |
 
 Client info set by the application (`Connection.setClientInfo`) is forwarded to the physical connection
@@ -227,6 +227,10 @@ every `DBP_POOL_STATS_SECONDS`, heartbeats every `DBP_HEARTBEAT_SECONDS`.
 * `OUT_PARAMS` is sent whenever `OutParam[]` was non-empty; cursor-typed entries carry the `INT` cursorId of the
   result item streamed just before (section 4.7). `GENERATED_KEYS` is sent only when requested *and* the driver
   returned keys.
+* An ERROR that terminates an EXECUTE sequence after result items were streamed closes the cursors of those items on
+  the gateway (the driver discards them); the session is not left pinned by them.
+* A connection must send HELLO within 15 s and in a frame of at most 256 KiB; afterwards the configured frame size and
+  idle timeout apply.
 * Every HELLO failure is `fatal = 1` and the socket is closed. `08001` (pool exhausted / database down) on a
   statement is **not** fatal: the session survives and may retry. `08006` is fatal (idle timeout, lost physical
   connection with state, shutdown).
@@ -238,6 +242,14 @@ every `DBP_POOL_STATS_SECONDS`, heartbeats every `DBP_HEARTBEAT_SECONDS`.
 
 ## Limitations
 
+* **Session state is not isolated in `TRANSACTION` mode.** Everything the gateway cannot see and reset travels with
+  the physical connection to the next logical session that borrows it: temporary tables, `SET` session variables
+  (`search_path`, `statement_timeout`, …), `ALTER SESSION`, Oracle package state, `DBMS_OUTPUT` buffers, prepared
+  server-side cursors. Applications that rely on any of these need a grant in `SESSION` mode. What *is* reset on release:
+  autocommit, isolation, read-only, schema/catalog (when changed through JDBC), client info, network timeout, warnings.
+* A grant's `readOnly` is enforced with `Connection.setReadOnly(true)` on the physical connection, i.e. as strictly as
+  the physical driver/database enforces it (PostgreSQL rejects writes, Oracle starts read-only transactions, H2 treats it
+  as a hint). It is not a SQL-level write filter.
 * No XA / distributed transactions.
 * Cursors are forward-only, read-only; no scrollable or updatable result sets, no holdable cursors across
   COMMIT beyond what the physical driver offers (section 4.8).
@@ -249,6 +261,15 @@ every `DBP_POOL_STATS_SECONDS`, heartbeats every `DBP_HEARTBEAT_SECONDS`.
   I/O pin carrier threads, which limits parallelism to the number of carriers while statements run on the
   database. The gateway itself never holds a monitor around pool or driver calls (j.u.c locks only).
 * `PREPARED.parameterCount` is always `-1` (the gateway never touches the database at PREPARE time).
+* `TIME` values are forwarded with the physical driver's `java.time` precision (`getObject(i, LocalTime.class)`);
+  drivers without `java.time` support fall back to `java.sql.Time` and lose the sub-millisecond part.
+* `DATE` / `TIMESTAMP` travel as the `java.sql.Date` / `java.sql.Timestamp` the physical driver returns (legacy calendar,
+  gateway default zone), and the driver rebuilds them with the same legacy bridges, so `getDate` / `getTimestamp` match a
+  direct connection exactly. Only for wall times before 1893 (LMT offsets with seconds) or dates before the 1582 Gregorian
+  cutover can `getObject(i, LocalDate/LocalDateTime.class)` differ from a direct connection's `java.time` accessors by that
+  historical delta.
+* A `BatchUpdateException` of the physical driver is reported as a plain ERROR: per-element update counts of a partially
+  executed batch are not delivered.
 
 ## Build and test
 
