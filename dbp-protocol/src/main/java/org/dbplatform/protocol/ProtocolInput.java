@@ -25,7 +25,7 @@ public final class ProtocolInput {
      * @param data payload bytes
      */
     public ProtocolInput(byte[] data) {
-        this(data, 0, data.length);
+        this(data, 0, data == null ? 0 : data.length);
     }
 
     /**

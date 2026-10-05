@@ -269,6 +269,24 @@ EXECUTE →   ( RESULT_SET_HEADER ROWS | UPDATE_COUNT )*  OUT_PARAMS?  GENERATED
   `dbp.maxOpenCursorsPerSession` (default 256) cursors open and returns ERROR `HY000` beyond that.
 * While any cursor is open the session stays pinned to its physical connection.
 
+### 4.7 Cursor-typed OUT parameters (Oracle `SYS_REFCURSOR`, PostgreSQL `refcursor`)
+
+When a CALLABLE execution registers an OUT parameter whose `jdbcType` is `java.sql.Types.REF_CURSOR`
+(2012) or the Oracle legacy code `-10` (`OracleTypes.CURSOR`), the gateway reads the returned
+`ResultSet` and streams it like any other result item (`RESULT_SET_HEADER` + first `ROWS`) **before**
+`OUT_PARAMS`. The matching `OUT_PARAMS` entry carries an `INT` value equal to that result item's
+`cursorId`. The driver's `CallableStatement.getObject(index)` returns a `ResultSet` bound to that
+cursor (fetching further rows with `FETCH`); `getMoreResults()` on the statement skips cursor items
+that belong to OUT parameters. Non-cursor OUT parameters are carried as ordinary tagged values.
+
+### 4.8 Pinning and cursors across statements
+
+A session may keep several cursors open (one per open `ResultSet`), all on the same pinned physical
+connection. `COMMIT`/`ROLLBACK` while cursors are open: the gateway commits/rolls back on the physical
+connection and keeps the session pinned until the cursors close (the physical driver decides whether
+the cursors survive; Oracle keeps them, PostgreSQL closes non-holdable ones — the next `FETCH` then
+returns `ROWS` with `last = 1` and zero rows or an `ERROR`, as the physical driver reports).
+
 ## 5. Errors
 
 `ERROR.sqlState` and `vendorCode` are copied from the physical `SQLException` when available.
@@ -324,6 +342,7 @@ org.dbplatform.protocol.ProtocolInput    // typed readers over a payload: readSt
 org.dbplatform.protocol.ProtocolOutput   // typed writers building a payload byte[]
 org.dbplatform.protocol.Values           // encode/decode Value <-> Java object, jdbcType -> tag mapping
 org.dbplatform.protocol.messages.*       // records for every message with encode()/decode(ProtocolInput)
+                                         // (the ERROR frame's record is named ErrorMessage; Rows.decode needs the column count)
 org.dbplatform.protocol.ColumnMeta       // record
 org.dbplatform.protocol.ProtocolException // thrown on malformed frames
 ```

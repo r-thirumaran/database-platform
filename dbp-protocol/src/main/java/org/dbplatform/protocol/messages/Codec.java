@@ -22,6 +22,8 @@ final class Codec {
     static final int MIN_COLUMN_META_BYTES = 7 * 4 + 4 * 4 + 1 + 6;
     /** Minimum encoded size of a {@code Warning} (2 null strings + i32). */
     static final int MIN_WARNING_BYTES = 4 + 4 + 4;
+    /** Upper bound accepted for the row count of a zero-column result (cannot be size-validated). */
+    static final int MAX_ZERO_COLUMN_ROWS = 1_000_000;
 
     private Codec() {
     }
@@ -112,9 +114,15 @@ final class Codec {
         if (columnCount < 0) {
             throw new ProtocolException("negative column count " + columnCount);
         }
-        int rowCount = in.readCount("row", Math.max(columnCount, 1) == columnCount ? columnCount : 1);
-        if (columnCount == 0 && rowCount > 0 && in.remaining() == 0) {
-            // zero-column rows occupy no bytes; nothing to validate beyond the count being non-negative
+        int rowCount;
+        if (columnCount == 0) {
+            // zero-column rows occupy no bytes, so the count cannot be validated against the payload size
+            rowCount = in.readI32();
+            if (rowCount < 0 || rowCount > MAX_ZERO_COLUMN_ROWS) {
+                throw new ProtocolException("implausible row count " + rowCount + " for a zero-column result");
+            }
+        } else {
+            rowCount = in.readCount("row", columnCount);
         }
         List<List<Object>> rows = new ArrayList<>(Math.min(rowCount, 4096));
         for (int i = 0; i < rowCount; i++) {
