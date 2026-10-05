@@ -64,7 +64,7 @@ function TableView({ s }: { s: TableSummary }) {
         <MigrationCard t={t} />
         <Card className="span-2" title="Consumers" hint="direct and via routines, with source and confidence" tight>
           {s.consumers.length === 0 ? <EmptyState inline title="No consumer observed" hint="Relationships are derived from gateway telemetry, proxy correlation, collector samples and the audit trail." /> : (
-            <DataTable compact rows={s.consumers} rowKey={(c) => `${c.application.id}-${c.kind}-${c.viaRoutine?.id ?? 'direct'}`} initialSort={{ key: 'q', dir: 'desc' }} columns={[
+            <DataTable compact rows={s.consumers} rowKey={(c) => `${c.application.id}-${c.kind}-${c.source ?? ''}-${c.viaRoutine?.id ?? c.viaView?.id ?? 'direct'}`} initialSort={{ key: 'q', dir: 'desc' }} columns={[
               { key: 'app', header: 'Application', render: (c) => <Link to={links.application(c.application.id)}>{c.application.name}</Link> },
               { key: 'team', header: 'Team', render: (c) => (c.team ? <Link to={links.team(c.team.id)} style={c.team.id !== t.ownerTeamId ? { color: 'var(--warning)' } : undefined} title={c.team.id !== t.ownerTeamId ? 'Cross-team access' : undefined}>{c.team.name}</Link> : <span className="muted">—</span>) },
               { key: 'kind', header: 'Access', render: (c) => <KindBadge kind={c.kind} /> },

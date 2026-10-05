@@ -86,9 +86,9 @@ export function DataTable<T>({
           </tr>
         </thead>
         <tbody>
-          {sorted.map((row) => (
+          {withUniqueKeys(sorted, rowKey).map(([row, key]) => (
             <tr
-              key={rowKey(row)}
+              key={key}
               className={clickable ? 'clickable' : ''}
               tabIndex={clickable ? 0 : undefined}
               onClick={clickable ? (e) => { if ((e.target as HTMLElement).closest('a,button,input,select')) return; activate(row); } : undefined}
@@ -105,4 +105,15 @@ export function DataTable<T>({
       </table>
     </div>
   );
+}
+
+/** Pairs rows with their key; a repeated key gets a positional suffix so React never sees duplicates. */
+function withUniqueKeys<T>(rows: T[], rowKey: (row: T) => string): Array<[T, string]> {
+  const seen = new Map<string, number>();
+  return rows.map((row) => {
+    const k = rowKey(row);
+    const n = seen.get(k) ?? 0;
+    seen.set(k, n + 1);
+    return [row, n === 0 ? k : `${k}#${n}`];
+  });
 }
