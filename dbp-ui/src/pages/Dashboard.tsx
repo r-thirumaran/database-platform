@@ -105,10 +105,10 @@ export function Dashboard() {
                   <Meter
                     key={`${p.gatewayId}-${p.datasourceId}-${p.databaseId}`}
                     label={<Link to={links.datasource(p.datasourceId)}>{p.datasource}</Link>}
-                    sub={`${p.gatewayId} · ${p.engine}`}
+                    sub={`${p.gatewayId} · ${p.engine} · ${p.idle} idle${p.waiting ? ` · ${p.waiting} waiting` : ''}`}
                     value={p.active + p.idle}
                     max={p.max}
-                    format={(v, m) => `${p.active} active · ${p.idle} idle / ${m}${p.waiting ? ` · ${p.waiting} waiting` : ''}${v > m ? '' : ''}`}
+                    format={(_v, m) => `${p.active} active / ${m}`}
                   />
                 ))}
               </div>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Download, ExternalLink, GitBranch, Maximize2, Minus, Plus, RefreshCw, X, AlertTriangle } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
@@ -9,7 +9,9 @@ import { Card, KV } from '../../components/Card';
 import { Loading, ErrorState, EmptyState } from '../../components/States';
 import { Badge, KindBadge } from '../../components/Badge';
 import { EntityPicker, type EntityOption } from '../../components/EntityPicker';
-import { GraphCanvas, EDGE_STYLE, NODE_SHAPE, type GraphCanvasHandle } from '../../charts/GraphCanvas';
+import { GraphCanvas, type GraphCanvasHandle } from '../../charts/GraphCanvas';
+import { EDGE_STYLE, NODE_SHAPE } from '../../charts/graphStyles';
+import { useResettableState } from '../../lib/useSyncedState';
 import { NODE_COLOR } from '../../charts/palette';
 import { useToast } from '../../components/Toast';
 import { errorMessage } from '../../api/client';
@@ -39,11 +41,11 @@ export function GraphPage() {
   const [sp, setSp] = useSearchParams();
   const rootParam = sp.get('root') ?? '';
   const depth = Number(sp.get('depth') ?? 2);
-  const [root, setRoot] = useState<EntityOption | null>(null);
   const [types, setTypes] = useState<Set<string>>(new Set(ALL_TYPES.map((t) => t.include)));
   const [edgeKinds, setEdgeKinds] = useState<Set<EdgeKind>>(new Set(ALL_EDGES));
-  const [extra, setExtra] = useState<Graph | null>(null);
-  const [selected, setSelected] = useState<GraphNode | null>(null);
+  const viewKey = `${rootParam}|${depth}`;
+  const [extra, setExtra] = useResettableState<Graph | null>(null, viewKey);
+  const [selected, setSelected] = useResettableState<GraphNode | null>(null, viewKey);
   const canvas = useRef<GraphCanvasHandle>(null);
   const toast = useToast();
   const qc = useQueryClient();
@@ -51,14 +53,13 @@ export function GraphPage() {
   const query = useMemo(() => ({ root: rootParam || undefined, depth, include: [...types], edgeKinds: [...edgeKinds], limit: 400 }), [rootParam, depth, types, edgeKinds]);
   const graph = useGraph(query);
 
-  // Reflect ?root=type:id into the picker label once the entity lists are loaded.
-  useEffect(() => {
-    if (!rootParam) { setRoot(null); return; }
+  // Reflect ?root=type:id into the picker label once the graph is loaded.
+  const root = useMemo<EntityOption | null>(() => {
+    if (!rootParam) return null;
     const [type, id] = rootParam.split(':');
     const n = graph.data?.nodes.find((x) => x.id === rootParam);
-    setRoot({ type: type as GraphRootType, id, label: n?.label ?? id });
+    return { type: type as GraphRootType, id, label: n?.label ?? id };
   }, [rootParam, graph.data]);
-  useEffect(() => { setExtra(null); setSelected(null); }, [rootParam, depth]);
 
   const merged = useMemo(() => {
     if (!graph.data) return null;
@@ -70,7 +71,7 @@ export function GraphPage() {
   }, [graph.data, extra, types, edgeKinds, rootParam]);
 
   const setParam = (k: string, v?: string) => { const n = new URLSearchParams(sp); if (v) n.set(k, v); else n.delete(k); setSp(n, { replace: true }); };
-  const pickRoot = (o: EntityOption) => { setRoot(o); setParam('root', `${o.type}:${o.id}`); };
+  const pickRoot = (o: EntityOption) => setParam('root', `${o.type}:${o.id}`);
 
   const expand = useCallback(async (node: GraphNode) => {
     try {
@@ -81,7 +82,7 @@ export function GraphPage() {
     } catch (e) {
       toast.error(errorMessage(e));
     }
-  }, [qc, toast]);
+  }, [qc, toast, setExtra]);
 
   const exportPng = () => {
     const blob = canvas.current?.exportPng();

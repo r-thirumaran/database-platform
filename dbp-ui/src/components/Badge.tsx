@@ -63,13 +63,7 @@ const RKIND_TONE: Record<RoutineKind, Tone> = { PROCEDURE: 'pink', FUNCTION: 'pi
 export const RoutineKindBadge = ({ kind }: { kind: RoutineKind | string | undefined }) => (kind ? <Badge tone={RKIND_TONE[kind as RoutineKind] ?? ''} outline>{kind.replace('_', ' ')}</Badge> : null);
 export const TableKindBadge = ({ kind }: { kind: TableKind | string | undefined }) => (kind && kind !== 'TABLE' ? <Badge outline>{kind.replace('_', ' ')}</Badge> : null);
 
-export const POLICY_LABEL: Record<PolicyKind, string> = {
-  CROSS_TEAM_DIRECT_ACCESS: 'Cross-team direct access',
-  UNOWNED_TABLE: 'Unowned table',
-  UNDECLARED_CONSUMER: 'Undeclared consumer',
-  WRITE_BY_NON_PRODUCER: 'Write by non-producer',
-  DIRECT_DB_ACCESS_BYPASSING_PLATFORM: 'Direct DB access bypassing platform',
-};
+import { POLICY_LABEL } from '../lib/labels';
 export const PolicyBadge = ({ kind }: { kind: PolicyKind }) => <Badge outline title={kind}>{POLICY_LABEL[kind] ?? kind}</Badge>;
 
 export function Confidence({ value }: { value: number | undefined }) {

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSyncedState } from '../lib/useSyncedState';
 import { AppWindow, Database, Layers, Search, Table2, Users, Workflow } from 'lucide-react';
 import { useAllTables, useApplications, useDatabases, useDatasources, useRoutines, useTeams } from '../api/hooks';
 import type { GraphRootType } from '../api/types';
@@ -16,11 +17,10 @@ export function EntityPicker({ types, value, onChange, placeholder = 'Search tea
   const dbs = useDatabases();
   const tables = useAllTables();
   const routines = useRoutines();
-  const [q, setQ] = useState(value?.label ?? '');
+  const [q, setQ] = useSyncedState(value?.label ?? '');
   const [open, setOpen] = useState(false);
   const [idx, setIdx] = useState(0);
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => setQ(value?.label ?? ''), [value]);
 
   const options = useMemo<EntityOption[]>(() => {
     const want = (t: GraphRootType) => !types || types.includes(t);

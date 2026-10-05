@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
+import { useSyncedState } from '../../lib/useSyncedState';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { KeyRound, Pencil, Plus, Trash2, AlertTriangle } from 'lucide-react';
 import { useAccessGrantMutations, useAllTables, useApiKeys, useApplicationMutations, useApplicationSummary, useDatasources, useRelationships, useRoutines, useTopQueries } from '../../api/hooks';
@@ -155,8 +156,7 @@ const RULE_FIELDS: Array<{ key: keyof IdentityRules; label: string; help: string
 function IdentityRulesCard({ app, className }: { app: Application; className?: string }) {
   const { update } = useApplicationMutations(app.id);
   const toast = useToast();
-  const [rules, setRules] = useState<IdentityRules>(app.identityRules);
-  useEffect(() => setRules(app.identityRules), [app.identityRules]);
+  const [rules, setRules] = useSyncedState<IdentityRules>(app.identityRules);
   const dirty = JSON.stringify(rules) !== JSON.stringify(app.identityRules);
   return (
     <Card className={className} title="Identity rules" hint="how proxy and collectors attribute connections" actions={dirty && <button className="btn sm ghost" onClick={() => setRules(app.identityRules)}>Reset</button>}>

@@ -1,0 +1,26 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:dbp-test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  h2:
+    console:
+      enabled: false
+dbp:
+  service-token: test-service-token
+  demo:
+    seed-enabled: true
+    seed-on-startup: false
+  collector:
+    enabled: false
+    tick-seconds: 3600
+  governance:
+    interval-seconds: 36000
+  telemetry:
+    cleanup-interval-seconds: 36000
+  component-healthy-seconds: 60
+logging:
+  level:
+    root: WARN
+    org.dbplatform: INFO

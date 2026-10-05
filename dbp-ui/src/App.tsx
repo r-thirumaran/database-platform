@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react';
+import { Suspense } from 'react';
 import { createBrowserRouter, Navigate } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { Loading } from './components/States';
@@ -21,9 +21,7 @@ import { GovernancePage } from './pages/runtime/GovernancePage';
 import { AdminPage } from './pages/admin/AdminPage';
 import { NotFound } from './pages/NotFound';
 
-// Cytoscape is only needed by the graph and impact pages: keep it out of the main bundle.
-const GraphPage = lazy(() => import('./pages/graph/GraphPage').then((m) => ({ default: m.GraphPage })));
-const ImpactPage = lazy(() => import('./pages/impact/ImpactPage').then((m) => ({ default: m.ImpactPage })));
+import { GraphPage, ImpactPage } from './pages/lazy';
 
 const lazyEl = (el: React.ReactNode) => <Suspense fallback={<Loading />}>{el}</Suspense>;
 

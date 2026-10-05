@@ -28,10 +28,6 @@ public final class PoolManager implements AutoCloseable {
         CredentialMaterial credentials() throws SQLException;
     }
 
-    /** Pool specification without the secret. */
-    public record PoolSpec(PoolSettings template) {
-    }
-
     private final String gatewayId;
     private final Map<String, PhysicalPool> pools = new ConcurrentHashMap<>();
     private final Map<String, Object> locks = new ConcurrentHashMap<>();

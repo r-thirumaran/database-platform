@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
+import { useSyncedState } from '../../lib/useSyncedState';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ArrowRight, ArrowLeftRight, Pencil, Plus, Trash2 } from 'lucide-react';
 import {
@@ -87,8 +88,8 @@ function DatasourceView({ s }: { s: DatasourceSummary }) {
         <Card title="Gateway pools" hint="live">
           {s.pools.length === 0 ? <EmptyState inline title="No pool stats yet" hint="Gateways report pool stats every few seconds." /> : (
             s.pools.map((p) => (
-              <Meter key={`${p.gatewayId}-${p.databaseId}`} label={p.gatewayId} sub={`${dbName(p.databaseId)} · cred v${p.credentialVersion}`} value={p.active + p.idle} max={p.max}
-                format={(v, m) => `${p.active} active · ${p.idle} idle / ${m}${p.waiting ? ` · ${p.waiting} waiting` : ''} · ${p.logicalSessions} logical${v > m ? '' : ''}`} />
+              <Meter key={`${p.gatewayId}-${p.databaseId}`} label={p.gatewayId} sub={`${dbName(p.databaseId)} · ${p.idle} idle${p.waiting ? ` · ${p.waiting} waiting` : ''} · ${p.logicalSessions} logical · cred v${p.credentialVersion}`} value={p.active + p.idle} max={p.max}
+                format={(_v, m) => `${p.active} active / ${m}`} />
             ))
           )}
         </Card>
@@ -148,8 +149,7 @@ function DatasourceView({ s }: { s: DatasourceSummary }) {
 
 // ------------------------------------------------------------------ pool policy
 function PoolPolicyEditor({ policy, onSave, busy }: { policy: PoolPolicy; onSave: (p: PoolPolicy) => void; busy: boolean }) {
-  const [p, setP] = useState(policy);
-  useEffect(() => setP(policy), [policy]);
+  const [p, setP] = useSyncedState(policy);
   const dirty = JSON.stringify(p) !== JSON.stringify(policy);
   const num = (k: keyof PoolPolicy, label: string, help?: string) => (
     <Field key={k} label={label} help={help}>{(id) => <input id={id} className="input sm" type="number" min={0} value={p[k] as number} onChange={(e) => setP({ ...p, [k]: Number(e.target.value) })} />}</Field>

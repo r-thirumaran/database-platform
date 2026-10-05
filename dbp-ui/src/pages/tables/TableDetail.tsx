@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
+import { useSyncedState } from '../../lib/useSyncedState';
 import { Link, useParams } from 'react-router-dom';
 import { CheckCircle2, GitBranch, Pencil } from 'lucide-react';
 import { useApplications, useColumns, useDatabases, useTableMutations, useTableSummary, useTeams } from '../../api/hooks';
@@ -109,9 +110,8 @@ function OwnershipCard({ t, s }: { t: Table; s: TableSummary }) {
   const apps = useApplications();
   const { ownership, update } = useTableMutations();
   const toast = useToast();
-  const [teamId, setTeamId] = useState(t.ownerTeamId ?? '');
-  const [producerId, setProducerId] = useState(t.producerApplicationId ?? '');
-  useEffect(() => { setTeamId(t.ownerTeamId ?? ''); setProducerId(t.producerApplicationId ?? ''); }, [t.ownerTeamId, t.producerApplicationId]);
+  const [teamId, setTeamId] = useSyncedState(t.ownerTeamId ?? '');
+  const [producerId, setProducerId] = useSyncedState(t.producerApplicationId ?? '');
   const soleWriter = (() => { const writers = new Set(s.consumers.filter((c) => c.kind === 'WRITES').map((c) => c.application)); return writers.size === 1 ? [...writers][0] : null; })();
   return (
     <Card title="Ownership" hint={<OwnerSourceBadge source={t.ownerSource} confirmed={t.ownerConfirmed} />}>
@@ -151,8 +151,7 @@ function MigrationCard({ t }: { t: Table }) {
   const dbs = useDatabases();
   const { update } = useTableMutations();
   const toast = useToast();
-  const [m, setM] = useState(t.migration);
-  useEffect(() => setM(t.migration), [t.migration]);
+  const [m, setM] = useSyncedState(t.migration);
   const dirty = JSON.stringify(m) !== JSON.stringify(t.migration);
   return (
     <Card title="Migration" hint={<MigrationBadge state={t.migration.state} />}>

@@ -346,7 +346,7 @@ final class Conversions {
             case null -> null;
             case LocalDate d -> d;
             case LocalDateTime ldt -> ldt.toLocalDate();
-            case OffsetDateTime odt -> (zone == null ? odt : odt.atZoneSameInstant(zone)).toLocalDate();
+            case OffsetDateTime odt -> zone == null ? odt.toLocalDate() : odt.atZoneSameInstant(zone).toLocalDate();
             case String s -> parseLocalDate(s, v);
             default -> throw DbpSqlExceptions.cannotConvert(v, "date");
         };
@@ -357,7 +357,7 @@ final class Conversions {
             case null -> null;
             case LocalTime t -> t;
             case LocalDateTime ldt -> ldt.toLocalTime();
-            case OffsetDateTime odt -> (zone == null ? odt : odt.atZoneSameInstant(zone)).toLocalTime();
+            case OffsetDateTime odt -> zone == null ? odt.toLocalTime() : odt.atZoneSameInstant(zone).toLocalTime();
             case OffsetTime ot -> zone == null ? ot.toLocalTime()
                     : ot.atDate(LocalDate.EPOCH).atZoneSameInstant(zone).toLocalTime();
             case String s -> parseLocalTime(s, v);
@@ -371,9 +371,9 @@ final class Conversions {
             case LocalDateTime ldt -> ldt;
             case LocalDate d -> d.atStartOfDay();
             case LocalTime t -> LocalDate.EPOCH.atTime(t);
-            case OffsetDateTime odt -> (zone == null ? odt : odt.atZoneSameInstant(zone)).toLocalDateTime();
-            case OffsetTime ot -> (zone == null ? ot.atDate(LocalDate.EPOCH)
-                    : ot.atDate(LocalDate.EPOCH).atZoneSameInstant(zone)).toLocalDateTime();
+            case OffsetDateTime odt -> zone == null ? odt.toLocalDateTime() : odt.atZoneSameInstant(zone).toLocalDateTime();
+            case OffsetTime ot -> zone == null ? ot.atDate(LocalDate.EPOCH).toLocalDateTime()
+                    : ot.atDate(LocalDate.EPOCH).atZoneSameInstant(zone).toLocalDateTime();
             case String s -> parseLocalDateTime(s, v);
             default -> throw DbpSqlExceptions.cannotConvert(v, "timestamp");
         };
