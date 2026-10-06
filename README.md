@@ -1,6 +1,6 @@
 # Database Access Platform
 
-[![build](https://github.com/r-thirumaran/database-platform/actions/workflows/build.yml/badge.svg?branch=claude%2Fdatabase-access-platform-repo-skvjxm)](https://github.com/r-thirumaran/database-platform/actions/workflows/build.yml)
+[![build](https://github.com/r-thirumaran/database-platform/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/r-thirumaran/database-platform/actions/workflows/build.yml)
 ![Java 21](https://img.shields.io/badge/Java-21-blue) ![Licence Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-green)
 
 An open-source platform that puts a **control plane, a connection gateway and a data-ownership graph**
