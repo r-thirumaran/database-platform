@@ -8,7 +8,7 @@ const DEFAULT: DatabaseInput = {
   name: '', engine: 'POSTGRES', host: '', port: 5432, serviceName: '', credentialId: null, maxPhysicalConnections: 50, jdbcProperties: {},
   collector: { enabled: true, dictionaryIntervalSeconds: 3600, runtimeIntervalSeconds: 15, schemas: [], auditTrail: false }, description: '', tags: [],
 };
-const DEFAULT_PORT: Record<Engine, number> = { ORACLE: 1521, POSTGRES: 5432, MSSQL: 1433 };
+const DEFAULT_PORT: Record<Engine, number> = { ORACLE: 1521, POSTGRES: 5432, MSSQL: 1433, H2: 9092, OTHER: 0 };
 
 export function DatabaseForm({ initial, onSubmit, busy, onCancel }: { initial?: Database; onSubmit: (v: DatabaseInput) => void; busy?: boolean; onCancel: () => void }) {
   const [v, setV] = useState<DatabaseInput>(initial ? { ...DEFAULT, ...initial } : DEFAULT);
@@ -27,7 +27,7 @@ export function DatabaseForm({ initial, onSubmit, busy, onCancel }: { initial?: 
         <Field label="Name">{(id) => <input id={id} className="input" required value={v.name} onChange={(e) => set('name', e.target.value)} placeholder="sales-postgres" />}</Field>
         <Field label="Engine">{(id) => (
           <select id={id} className="input" value={v.engine} onChange={(e) => { const eng = e.target.value as Engine; set('engine', eng); if (!initial) set('port', DEFAULT_PORT[eng]); }}>
-            <option>ORACLE</option><option>POSTGRES</option><option>MSSQL</option>
+            <option>ORACLE</option><option>POSTGRES</option><option>MSSQL</option><option>H2</option><option>OTHER</option>
           </select>
         )}</Field>
         <Field label="Host">{(id) => <input id={id} className="input" required value={v.host} onChange={(e) => set('host', e.target.value)} />}</Field>

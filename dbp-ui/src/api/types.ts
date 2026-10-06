@@ -130,7 +130,7 @@ export interface ApiKeyCreated {
 }
 
 // ---------------------------------------------------------------- 3. databases
-export type Engine = 'ORACLE' | 'POSTGRES' | 'MSSQL';
+export type Engine = 'ORACLE' | 'POSTGRES' | 'MSSQL' | 'H2' | 'OTHER';
 
 export interface CollectorConfig {
   enabled: boolean;

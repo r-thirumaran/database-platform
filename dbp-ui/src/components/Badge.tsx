@@ -16,7 +16,7 @@ export function Badge({ tone = '', children, outline = false, lg = false, title,
   );
 }
 
-const ENGINE_TONE: Record<Engine, Tone> = { ORACLE: 'red', POSTGRES: 'blue', MSSQL: 'violet' };
+const ENGINE_TONE: Record<Engine, Tone> = { ORACLE: 'red', POSTGRES: 'blue', MSSQL: 'violet', H2: 'teal', OTHER: 'muted' };
 export const EngineBadge = ({ engine, lg }: { engine: Engine | string | null | undefined; lg?: boolean }) =>
   engine ? <Badge tone={ENGINE_TONE[engine as Engine] ?? ''} lg={lg}>{engine}</Badge> : null;
 
