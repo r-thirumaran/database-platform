@@ -84,10 +84,61 @@ class ResolutionApiTest extends AbstractApiTest {
         }
         assertThat(routeFound).isTrue();
         boolean appFound = false;
-        for (JsonNode a : cfg.get("applications")) if (a.get("id").asText().equals(pinned)) { appFound = true; assertThat(a.get("identityRules").has("programs")).isTrue(); assertThat(a.get("identityRules").has("programNames")).isTrue(); }
+        for (JsonNode a : cfg.get("applications")) if (a.get("id").asText().equals(pinned)) { appFound = true; assertThat(a.get("identityRules").has("programNames")).isTrue(); assertThat(a.get("identityRules").has("programs")).isFalse(); }
         assertThat(appFound).isTrue();
         boolean quota = false;
         for (JsonNode q : cfg.get("quotas")) if (q.get("applicationId").asText().equals(pinned) && q.get("datasourceId").asText().equals(ds.get("id").asText())) quota = q.get("maxProxyConnections").asInt() == 10;
         assertThat(quota).isTrue();
+    }
+
+    /**
+     * The proxy's Jackson record accepts the dbp-common spelling as an alias of the public one, but rejects a document that
+     * carries both ("Should never call set() on setterless property"). The proxy configuration must therefore contain exactly
+     * one spelling per identity rule - the public API spelling.
+     */
+    @Test
+    void proxyConfigEmitsExactlyOneSpellingPerIdentityRule() throws Exception {
+        String teamId = team(uniq("team")).get("id").asText();
+        String withRules = application(uniq("rules"), teamId, "SERVICE", Map.of("identityRules", Map.of(
+                "serviceAliases", List.of("orders"),
+                "programNames", List.of("orders-service", "JDBC Thin Client/orders"),
+                "pgApplicationNames", List.of("orders-pg"),
+                "machinePatterns", List.of("orders-*"),
+                "cidrs", List.of("10.20.0.0/16")))).get("id").asText();
+        String withoutRules = application(uniq("bare"), teamId, "UI", Map.of()).get("id").asText();
+
+        JsonNode cfg = internalGet("/api/v1/internal/proxy/config?proxyId=proxy-spelling", 200);
+        List<String> expectedKeys = List.of("serviceAliases", "programNames", "pgApplicationNames", "machinePatterns", "cidrs");
+        List<String> oldSpellings = List.of("programs", "machines", "applicationNames");
+        int checked = 0;
+        for (JsonNode app : cfg.get("applications")) {
+            JsonNode rules = app.get("identityRules");
+            List<String> keys = new java.util.ArrayList<>();
+            rules.fieldNames().forEachRemaining(keys::add);
+            assertThat(keys).as("identityRules keys of application %s", app.get("name").asText()).containsExactlyInAnyOrderElementsOf(expectedKeys);
+            for (String old : oldSpellings) assertThat(rules.has(old)).as("%s must not be emitted next to the public spelling", old).isFalse();
+            for (String key : expectedKeys) assertThat(rules.get(key).isArray()).as(key).isTrue();
+            checked++;
+            if (app.get("id").asText().equals(withRules)) {
+                assertThat(strings(rules.get("serviceAliases"))).containsExactly("orders");
+                assertThat(strings(rules.get("programNames"))).containsExactly("orders-service", "JDBC Thin Client/orders");
+                assertThat(strings(rules.get("pgApplicationNames"))).containsExactly("orders-pg");
+                assertThat(strings(rules.get("machinePatterns"))).containsExactly("orders-*");
+                assertThat(strings(rules.get("cidrs"))).containsExactly("10.20.0.0/16");
+            }
+            if (app.get("id").asText().equals(withoutRules)) {
+                for (String key : expectedKeys) assertThat(rules.get(key)).as(key).isEmpty();
+            }
+        }
+        assertThat(checked).isGreaterThanOrEqualTo(2);
+        // the raw document must not contain the old spellings anywhere in the applications array
+        String raw = cfg.get("applications").toString();
+        for (String old : oldSpellings) assertThat(raw).doesNotContain("\"" + old + "\"");
+    }
+
+    private static List<String> strings(JsonNode array) {
+        List<String> out = new java.util.ArrayList<>();
+        array.forEach(n -> out.add(n.asText()));
+        return out;
     }
 }

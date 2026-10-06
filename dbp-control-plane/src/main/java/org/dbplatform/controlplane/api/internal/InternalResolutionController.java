@@ -1,5 +1,7 @@
 package org.dbplatform.controlplane.api.internal;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.ArrayList;
@@ -154,10 +156,9 @@ public class InternalResolutionController {
         List<ProxyConfig.ProxyApplication> apps = new ArrayList<>();
         Map<String, IdentityRules> rulesById = new LinkedHashMap<>();
         for (Application a : applications.findAllByOrderByNameAsc()) {
-            IdentityRules ir = a.getIdentityRules();
-            rulesById.put(a.getId(), ir);
-            apps.add(new ProxyConfig.ProxyApplication(a.getId(), a.getName(), a.getTeamId(),
-                    new ProxyConfig.IdentityRules(ir.getServiceAliases(), ir.getProgramNames(), ir.getPgApplicationNames(), ir.getMachinePatterns(), ir.getCidrs())));
+            rulesById.put(a.getId(), a.getIdentityRules());
+            // the identity rules are written below in the public-API spelling; the dbp-common record is not serialised
+            apps.add(new ProxyConfig.ProxyApplication(a.getId(), a.getName(), a.getTeamId(), null));
         }
         List<ProxyConfig.Quota> quotas = new ArrayList<>();
         for (AccessGrant g : grants.findAll()) {
@@ -170,16 +171,31 @@ public class InternalResolutionController {
         }
         ProxyConfig cfg = new ProxyConfig(configVersion.current(), listeners, apps, quotas, dsQuotas);
         ObjectNode node = TelemetryJson.mapper().valueToTree(cfg);
-        // also expose the public-API spelling of the identity rules (programNames, machinePatterns, pgApplicationNames)
-        node.withArray("applications").forEach(an -> {
-            IdentityRules ir = rulesById.get(an.get("id").asText());
-            if (ir == null) return;
-            ObjectNode rules = (ObjectNode) an.get("identityRules");
-            rules.set("programNames", TelemetryJson.mapper().valueToTree(ir.getProgramNames()));
-            rules.set("machinePatterns", TelemetryJson.mapper().valueToTree(ir.getMachinePatterns()));
-            rules.set("pgApplicationNames", TelemetryJson.mapper().valueToTree(ir.getPgApplicationNames()));
-        });
+        // Identity rules: ONLY the public-API spelling (docs/control-plane-api.md §10). The dbp-common record spells the same
+        // rules programs/machines/applicationNames, and a document carrying both spellings is rejected by the proxy's
+        // Jackson record ("Should never call set() on setterless property"), so the node is replaced, not extended.
+        for (JsonNode applicationNode : node.withArray("applications")) {
+            IdentityRules ir = rulesById.get(applicationNode.get("id").asText());
+            ((ObjectNode) applicationNode).set("identityRules", publicIdentityRules(ir));
+        }
         if (proxyId != null) node.put("proxyId", proxyId);
         return node;
+    }
+
+    /** Identity rules of an application as the public API spells them; the proxy accepts this spelling directly. */
+    static ObjectNode publicIdentityRules(IdentityRules ir) {
+        ObjectNode rules = TelemetryJson.mapper().createObjectNode();
+        rules.set("serviceAliases", stringArray(ir == null ? null : ir.getServiceAliases()));
+        rules.set("programNames", stringArray(ir == null ? null : ir.getProgramNames()));
+        rules.set("pgApplicationNames", stringArray(ir == null ? null : ir.getPgApplicationNames()));
+        rules.set("machinePatterns", stringArray(ir == null ? null : ir.getMachinePatterns()));
+        rules.set("cidrs", stringArray(ir == null ? null : ir.getCidrs()));
+        return rules;
+    }
+
+    private static ArrayNode stringArray(List<String> values) {
+        ArrayNode array = TelemetryJson.mapper().createArrayNode();
+        if (values != null) values.forEach(array::add);
+        return array;
     }
 }
