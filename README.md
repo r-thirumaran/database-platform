@@ -212,9 +212,9 @@ Full report with environment, per-test evidence and defect list: [docs/validatio
 | JDBC driver                             | 70 tests against a scriptable fake gateway; real-driver round trips (below)                            | pass   |
 | Gateway                                 | 70 tests on H2 (incl. Oracle mode) and embedded PostgreSQL: pinning rules, 50 logical sessions on a 5-connection pool, callable OUT and ref-cursor parameters, rotation, TLS, plus 21 real-driver round-trip tests (value matrix, time zones, metadata, errors) | pass |
 | Proxy                                   | 64 tests: synthetic TNS packets (inline/deferred connect strings, REDIRECT, RESEND, REFUSE), real PostgreSQL end to end through the proxy incl. `pg_stat_activity.client_port` correlation and quota refusals | pass |
-| Control plane                           | Spring Boot test suite (REST contract, telemetry ingestion, CALL expansion, graph, impact, governance, import/export, Flyway on embedded PostgreSQL) | pass |
+| Control plane                           | 53 tests: REST contract, telemetry ingestion, CALL expansion, graph, impact, governance, import/export, Flyway on embedded PostgreSQL, zero-spurious-update and concurrent-ingestion regression tests | pass |
 | UI                                      | lint, type check, unit tests, Playwright walkthrough of every page and mutation against the **real** control plane (18/18) and the mock (18/18) | pass |
-| End to end (real jars, PostgreSQL 16)   | 41 scenario tests: bootstrap import, gateway in control-plane mode, driver over the full stack, HikariCP with physical connections capped at 4, batch load, telemetry round trip with CALL expansion, credential rotation, routing rule and switch, access control, proxy path | 41/41 pass (9 recorded deviations, see below) |
+| End to end (real jars, PostgreSQL 16)   | 42 scenario tests: bootstrap import, gateway in control-plane mode, driver over the full stack, HikariCP with physical connections capped at 4, batch load, telemetry round trip with CALL expansion, credential rotation, routing rule and switch, access control, proxy in control-plane mode | 42/42 pass, 0 deviations, 0 lock timeouts (final independent run, 2026-10-06) |
 | CI (GitHub Actions)                     | `mvn verify` for all modules, UI build, Docker image builds for control plane, gateway, proxy. The last run that GitHub executed for this branch (19:14 UTC, run 19) passed every module except a control-plane test fixed since; later runs on the feature branch were not scheduled (no runner assigned within seconds), which usually means the account's Actions minutes or spending limit — check *Settings → Billing → Actions*, then trigger the workflow manually (`workflow_dispatch`) or open a pull request. | see badge |
 
 ### Deviations and untested paths — read before relying on this
@@ -229,14 +229,17 @@ Found during validation and either fixed or still open at the time of writing (t
 * **Docker images, compose, Kubernetes and Helm** were validated structurally (YAML/JSON parsing,
   path and name consistency) but not run here; the GitHub Actions `docker` job builds the three
   platform images on every push.
-* **PostgreSQL dictionary crawler** read privilege-filtered `information_schema` views, so a
-  `pg_monitor`-only collector role catalogued almost nothing; **runtime sampler** failed when
-  `pg_stat_statements` lived outside the connection's `search_path`; the **proxy could not start in
-  control-plane mode** because the identity rules were emitted under two spellings; the **control
-  plane could not model H2**. All four are being fixed in the control plane (see the report for status).
-* **Gateway read-only grants** were not enforced for autocommit statements on PostgreSQL, and a
-  **failed first statement of a transaction** did not pin the session (PostgreSQL would report
-  `25P02`). Both are being fixed in the gateway.
+* **Fixed during validation** (all re-verified by the final full run): the PostgreSQL dictionary
+  crawler read privilege-filtered `information_schema` views; the runtime sampler failed when
+  `pg_stat_statements` lived outside the connection's `search_path`; the proxy could not start in
+  control-plane mode because identity rules were emitted under two spellings; the control plane
+  could not model H2; gateway read-only grants were not enforced for autocommit statements on
+  PostgreSQL; a failed first statement of a transaction did not pin the session; converter-backed
+  entity attributes without `equals` caused spurious `UPDATE`s and lock timeouts under concurrent
+  ingestion. Each is described with its root cause and fix in the report.
+* **Known races left in the control plane** (documented, low impact for a POC): no unique constraint on
+  `relationship`/`query_stat` rows, and relationship `queryCount` is a read-modify-write that can lose
+  increments between concurrent ingestion chunks.
 * **Not supported in the POC**: scrollable or updatable result sets, streaming LOBs beyond the
   frame limit, PostgreSQL large objects (`oid`), named callable parameters, vendor-specific
   `unwrap`, XA, per-element update counts on a failed batch, TLS between proxy and clients.

@@ -111,6 +111,18 @@ refused-counter assertion is mode aware. Two assertions that only held after S03
 scenarios can run alone. Not re-run: S01, S02, S04, S05, S07, S09 (so the D4 read-only row is unchanged); the S03 error-semantics
 test (D6) happened to pass in the S03 re-run (the gateway was not touched by this work and D6 is not re-assessed here).
 
+### 2b. Final full run after all fixes (2026-10-06 12:20 UTC, independent re-run by the integrator)
+
+`mvn -B -ntp install` at the repository root (every module's unit/integration tests, then `dbp-integration-tests`
+against the freshly built jars): **BUILD SUCCESS**. Module totals: protocol 260, common 217, driver 70, gateway 70,
+proxy 64, control plane 53, examples 20. Integration suite: **42 tests, 42 PASS, 0 PARTIAL, 0 FAIL**;
+`grep -c "Timeout trying to lock" target/it/logs/control-plane.log` = 0, no deadlocks, no leftover processes.
+Batch scenario: 20 logical connections over 4 physical connections, 870 statements/s on the shared 4-core box.
+
+Changes since run 3 that this run covers: gateway fixes for D4 (read-only enforcement), D6 (transaction pinning on a
+failed first statement) and D8 (eager gauges); control-plane fixes for D1, D2, D3, D5, D7 and D9 (below); the UI now
+models the H2 and OTHER engines.
+
 ### Scenario summary
 
 | # | Scenario | Result | What was proven |
@@ -214,7 +226,7 @@ other than `dbp-integration-tests` was modified; D1, D2, D3, D5 and D7 were hand
   resolution and `client_port` correlation are then verified on the proxy side only (`GET /connections/live`,
   `/components` and collector correlation cannot be checked without control-plane mode).
 
-### D4 — Read-only grant is not enforced for PostgreSQL autocommit statements (Medium, not worked around)
+### D4 — Read-only grant is not enforced for PostgreSQL autocommit statements (Medium, fixed in the gateway: writes rejected with 25006 before touching the database, `readOnlyMode=always` on PostgreSQL)
 
 * **Where**: `dbp-gateway … LogicalSession.applySettings` enforces `grant.readOnly` with `Connection.setReadOnly(true)`
   on the physical connection; `PhysicalPool.toHikari` sets no pgjdbc `readOnlyMode`.
@@ -244,7 +256,7 @@ other than `dbp-integration-tests` was modified; D1, D2, D3, D5 and D7 were hand
 * **Workaround in the tests**: the second engine is validated behind a second gateway in static mode; the
   control-plane routing switch uses a second PostgreSQL database (`sales_alt`).
 
-### D6 — A failing first statement does not start the transaction in the gateway (Low, not worked around)
+### D6 — A failing first statement does not start the transaction in the gateway (Low, fixed: the attempt pins the session and marks the transaction)
 
 * **Where**: `dbp-gateway … StatementExecutor.execute` calls `session.noteWork()` only after a successful
   `execute` (≈ line 156); `LogicalSession.noteWork()` is what sets `inTransaction = true` when autocommit is off.
@@ -266,11 +278,27 @@ other than `dbp-integration-tests` was modified; D1, D2, D3, D5 and D7 were hand
   pick the gateway's `all` jar. Fix: let `spring-boot-maven-plugin` repackage the main artifact (drop the custom
   finalName) or attach the repackaged jar with `<classifier>exec</classifier>`.
 
-### D8 — Gateway Prometheus gauges appear only after the first session (Low)
+### D8 — Gateway Prometheus gauges appear only after the first session (Low, fixed: per-datasource gauges registered at startup; pool gauge renamed `dbp_gateway_pool_connections`)
 
 * `GET /metrics` on a freshly started gateway contains no `dbp_gateway_*` gauges; they are registered per datasource
   with the first logical session. Dashboards show gaps after a restart. Fix: register the gauges when a
   datasource is first resolved / for every configured datasource in static mode.
+
+### D9 — Spurious `UPDATE application` statements cause lock timeouts under concurrent load (High, fixed)
+
+Found by the first full reactor run on 2026-10-06 (two S06 failures: `PessimisticLockingFailureException: Timeout
+trying to lock table "application"` in the runtime collector and in `POST /governance/evaluate`). Root cause: the
+converter-backed value types `IdentityRules`, `CollectorConfig`, `PoolPolicy` and `TableMigration` had no
+`equals`/`hashCode`, so Hibernate's dirty check re-wrote `application`, `database_instance`, `datasource` and
+`db_table` rows on every flush of any transaction that merely loaded them; long telemetry-ingestion transactions
+then held row locks that collectors and governance timed out on (H2 default lock timeout about 2 s). Fix (control
+plane): value-based equality and canonical JSON for every `@Convert` type; telemetry ingestion, collector merges and
+governance evaluation run as read-only transactions plus short chunked writes (200 events) with hot rows folded per
+chunk; `hibernate.order_updates`; dev H2 URL gains `LOCK_TIMEOUT=10000`. Tests: `SpuriousUpdateTest` (statement
+inspector proves zero spurious updates), `ConcurrentIngestionTest` (4 writers × 1 200 events while governance,
+collector and reads loop), `ValueTypesTest`, `DevStoreConfigTest`. Remaining known races (documented in the
+control-plane README): no unique constraint on `relationship`/`query_stat`, read-modify-write of relationship
+`queryCount` can lose increments between concurrent chunks.
 
 ### Observations that are not defects
 
