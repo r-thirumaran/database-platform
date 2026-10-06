@@ -95,6 +95,9 @@ public final class Gateway implements AutoCloseable {
             return;
         }
         resolver.start();
+        for (String ds : resolver.knownDatasources()) {
+            metrics.datasourceSeen(ds); // per-datasource gauges exist (at zero) before the first session arrives
+        }
         telemetry.start(config.poolStatsSeconds(), config.heartbeatSeconds());
         server.start();
         admin.start();
@@ -134,7 +137,18 @@ public final class Gateway implements AutoCloseable {
         return resolver;
     }
 
-    /** Graceful shutdown: stop accepting, wait for in-flight statements, close sessions, pools and telemetry. */
+    /**
+     * Graceful shutdown, in this order:
+     * <ol>
+     *   <li>stop accepting and wait up to the grace period for in-flight statements to finish;</li>
+     *   <li>close the client sockets so that every handler unblocks and releases its session <em>itself</em>, and wait
+     *       for the handler threads to terminate ({@link GatewayServer#stop});</li>
+     *   <li>close whatever session is still registered, but only when its handler is not executing: a session's own
+     *       cleanup and this path both release under the session lock and the release is idempotent, so a physical
+     *       connection is never returned twice, nor while a statement runs on it;</li>
+     *   <li>flush telemetry, close the pools (which aborts the connections of handlers still stuck in a driver call).</li>
+     * </ol>
+     */
     public synchronized void stop() {
         if (!started) {
             return;
@@ -145,9 +159,12 @@ public final class Gateway implements AutoCloseable {
         admin.close();
         for (var s : sessions.sessions()) {
             try {
-                s.close();
-            } catch (RuntimeException ignored) {
-                // best effort
+                if (!s.closeIfIdle(250)) {
+                    LOG.warn("session {} is still executing a statement after the shutdown grace period; its physical "
+                            + "connection is closed with the pool", s.id());
+                }
+            } catch (RuntimeException e) {
+                LOG.debug("closing session {} on shutdown failed: {}", s.id(), e.toString());
             } finally {
                 sessions.unregister(s);
             }

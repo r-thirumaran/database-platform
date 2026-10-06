@@ -12,6 +12,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -65,6 +66,20 @@ class StaticConfigTest {
         }
         assertThatThrownBy(() -> StaticConfigLoader.parse("gatewayId: ${MISSING}\ndatasources: []", Map.<String, String>of()::get))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("MISSING");
+    }
+
+    @Test
+    void toStringMasksSecrets() {
+        StaticConfig.DatasourceConfig ds = StaticConfig.DatasourceConfig.of("a", "H2", "jdbc:h2:mem:a", "sa", "s3cret-pw",
+                "TRANSACTION", 3).withJdbcProperties(Map.of("ApplicationName", "x", "sslpassword", "pw2", "token", "t0k"));
+        assertThat(ds.toString()).contains("name=a", "jdbcUrl=jdbc:h2:mem:a", "username=sa", "password=****",
+                "ApplicationName=x", "sslpassword=****", "token=****").doesNotContain("s3cret-pw", "pw2", "t0k");
+        assertThat(StaticConfig.DatasourceConfig.of("b", null, "jdbc:h2:mem:b", "sa", null, null, 1).toString())
+                .contains("password=null");
+        StaticConfig.ApplicationConfig app = new StaticConfig.ApplicationConfig("app", "dbp_1_verysecret", "team",
+                List.of(StaticConfig.GrantConfig.of("a")));
+        assertThat(app.toString()).contains("name=app", "apiKey=****", "datasources=").doesNotContain("dbp_1_verysecret");
+        assertThat(new StaticConfig("gw", List.of(ds), List.of(app)).toString()).doesNotContain("s3cret-pw", "dbp_1_verysecret");
     }
 
     @Test

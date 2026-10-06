@@ -7,6 +7,8 @@ import org.dbplatform.gateway.config.StaticConfigLoader;
 import org.dbplatform.gateway.pool.PoolMode;
 import org.dbplatform.gateway.pool.PoolSettings;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -36,6 +38,16 @@ public final class StaticResolver implements Resolver {
     @Override
     public String mode() {
         return "static";
+    }
+
+    /** Every configured datasource: their metrics are registered at startup, before any session arrives. */
+    @Override
+    public List<String> knownDatasources() {
+        List<String> names = new ArrayList<>(config.datasources().size());
+        for (StaticConfig.DatasourceConfig d : config.datasources()) {
+            names.add(d.name());
+        }
+        return names;
     }
 
     @Override

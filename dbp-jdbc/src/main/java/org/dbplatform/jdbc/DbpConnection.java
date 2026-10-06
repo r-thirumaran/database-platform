@@ -642,14 +642,34 @@ public final class DbpConnection extends DbpWrapper implements Connection {
         }
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>JDBC semantics: the given set <em>replaces</em> the current client info. Entries that are no longer present are
+     * cleared first ({@code SET_CLIENT_INFO name null}), then the new values are set; failures are collected per name.</p>
+     */
     @Override
     public void setClientInfo(Properties properties) throws SQLClientInfoException {
         if (properties == null) {
             return;
         }
-        Map<String, ClientInfoStatus> failures = new HashMap<>();
+        Map<String, ClientInfoStatus> failures = new LinkedHashMap<>();
         SQLException first = null;
-        for (String name : properties.stringPropertyNames()) {
+        Set<String> wanted = properties.stringPropertyNames();
+        for (String name : clientInfo.stringPropertyNames()) { // snapshot: safe while entries are removed
+            if (wanted.contains(name)) {
+                continue;
+            }
+            try {
+                setClientInfo(name, null);
+            } catch (SQLClientInfoException e) {
+                failures.put(name, ClientInfoStatus.REASON_UNKNOWN);
+                if (first == null) {
+                    first = e;
+                }
+            }
+        }
+        for (String name : wanted) {
             try {
                 setClientInfo(name, properties.getProperty(name));
             } catch (SQLClientInfoException e) {

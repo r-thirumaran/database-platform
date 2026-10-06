@@ -3,7 +3,9 @@ package org.dbplatform.gateway.config;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -37,6 +39,23 @@ public record StaticConfig(
     /** Returns {@code true} when an application registry is configured (api keys required). */
     public boolean hasApplications() {
         return !applications.isEmpty();
+    }
+
+    /** Masks a secret for logs and {@code toString()}: {@code null} stays {@code null}, anything else is {@code ****}. */
+    static String mask(String secret) {
+        return secret == null ? "null" : "****";
+    }
+
+    /** Masks the values of properties whose name looks like a secret (password, passwd, pwd, secret, token). */
+    static Map<String, String> maskSecrets(Map<String, String> props) {
+        Map<String, String> out = new LinkedHashMap<>();
+        for (Map.Entry<String, String> e : props.entrySet()) {
+            String k = e.getKey().toLowerCase(Locale.ROOT);
+            boolean secret = k.contains("password") || k.contains("passwd") || k.contains("pwd") || k.contains("secret")
+                    || k.contains("token");
+            out.put(e.getKey(), secret ? mask(e.getValue()) : e.getValue());
+        }
+        return out;
     }
 
     /**
@@ -100,6 +119,17 @@ public record StaticConfig(
                     maxConnections, minIdle, connectionTimeoutMs, idleTimeoutMs, maxLifetimeMs, seconds,
                     validationQuery, jdbcProperties);
         }
+
+        /** The record's default form would print the password; secrets are masked here. */
+        @Override
+        public String toString() {
+            return "DatasourceConfig[name=" + name + ", engine=" + engine + ", jdbcUrl=" + jdbcUrl + ", username=" + username
+                    + ", password=" + mask(password) + ", passwordEnv=" + passwordEnv + ", passwordFile=" + passwordFile
+                    + ", poolMode=" + poolMode + ", maxConnections=" + maxConnections + ", minIdle=" + minIdle
+                    + ", connectionTimeoutMs=" + connectionTimeoutMs + ", idleTimeoutMs=" + idleTimeoutMs
+                    + ", maxLifetimeMs=" + maxLifetimeMs + ", statementTimeoutSeconds=" + statementTimeoutSeconds
+                    + ", validationQuery=" + validationQuery + ", jdbcProperties=" + maskSecrets(jdbcProperties) + "]";
+        }
     }
 
     /**
@@ -125,6 +155,13 @@ public record StaticConfig(
                 }
             }
             return null;
+        }
+
+        /** The api key is a credential: masked. */
+        @Override
+        public String toString() {
+            return "ApplicationConfig[name=" + name + ", apiKey=" + mask(apiKey) + ", team=" + team + ", datasources="
+                    + datasources + "]";
         }
     }
 

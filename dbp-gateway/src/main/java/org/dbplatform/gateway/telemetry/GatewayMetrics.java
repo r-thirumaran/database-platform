@@ -22,7 +22,7 @@ import java.util.function.ToIntFunction;
  *
  * <pre>
  * dbp_gateway_logical_sessions{datasource}      dbp_gateway_pinned_sessions{datasource}
- * dbp_gateway_pool_active|idle|waiting|total|max{datasource}
+ * dbp_gateway_pool_active|idle|waiting|connections|max{datasource}
  * dbp_gateway_statements_total{datasource,operation,success}
  * dbp_gateway_statement_duration_seconds{datasource} (histogram)
  * dbp_gateway_errors_total{sqlstate}            dbp_gateway_telemetry_dropped_total
@@ -62,7 +62,10 @@ public final class GatewayMetrics {
                 .register(registry);
     }
 
-    /** Ensures the per-datasource gauges exist (idempotent). */
+    /**
+     * Ensures the per-datasource gauges exist (idempotent). Called at startup for every datasource known up front and
+     * at the first HELLO for the others, so dashboards see every datasource (at zero) before its first session.
+     */
     public void datasourceSeen(String datasource) {
         datasourceGauges.computeIfAbsent(datasource, ds -> {
             Tags tags = Tags.of("datasource", ds);
@@ -73,7 +76,8 @@ public final class GatewayMetrics {
             poolGauge("dbp.gateway.pool.active", ds, PhysicalPool::activeConnections);
             poolGauge("dbp.gateway.pool.idle", ds, PhysicalPool::idleConnections);
             poolGauge("dbp.gateway.pool.waiting", ds, PhysicalPool::waitingThreads);
-            poolGauge("dbp.gateway.pool.total", ds, PhysicalPool::totalConnections);
+            // not "pool.total": the Prometheus exposition strips the reserved _total suffix from gauges
+            poolGauge("dbp.gateway.pool.connections", ds, PhysicalPool::totalConnections);
             poolGauge("dbp.gateway.pool.max", ds, PhysicalPool::maxConnections);
             return Boolean.TRUE;
         });

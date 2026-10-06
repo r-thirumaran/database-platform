@@ -226,7 +226,7 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum(dbp_gateway_pool_total{datasource=~\"$datasource\"})",
+          "expr": "sum(dbp_gateway_pool_connections{datasource=~\"$datasource\"})",
           "legendFormat": "physical",
           "refId": "A",
           "range": true,
@@ -645,7 +645,7 @@
             "type": "prometheus",
             "uid": "dbp-prometheus"
           },
-          "expr": "sum(dbp_gateway_pool_total{datasource=~\"$datasource\"})",
+          "expr": "sum(dbp_gateway_pool_connections{datasource=~\"$datasource\"})",
           "legendFormat": "physical connections",
           "refId": "C",
           "range": true,

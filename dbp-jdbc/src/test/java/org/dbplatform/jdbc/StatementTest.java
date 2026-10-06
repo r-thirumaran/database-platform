@@ -17,6 +17,7 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLSyntaxErrorException;
+import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.sql.Types;
 import java.util.ArrayList;
@@ -277,6 +278,44 @@ class StatementTest extends GatewayTest {
             assertThat(s.getResultSet()).isNull();
             assertThat(c.isClosed()).isFalse();
             assertThat(s.executeQuery("select 1 rows").next()).isTrue();
+        }
+    }
+
+    @Test
+    void aFailingCloseOfThePreviousResultSetDoesNotDiscardTheNewResults() throws Exception {
+        gateway.setHandler((req, session) -> {
+            if (req instanceof CloseCursor) {
+                session.reply(new ErrorMessage("HY000", 0, "cursor bookkeeping failure", false));
+                return;
+            }
+            gateway.echo().handle(req, session);
+        });
+        try (Connection c = connect(); Statement s = c.createStatement()) {
+            s.setFetchSize(2);
+            ResultSet first = s.executeQuery("select 5 rows"); // leaves a server-side cursor open
+            assertThat(first.next()).isTrue();
+            // re-executing closes the previous result set; the gateway rejects that CLOSE_CURSOR. The EXECUTE already
+            // succeeded, so its results must be installed and the failure reported as a warning
+            ResultSet second = s.executeQuery("select 3 rows");
+            assertThat(first.isClosed()).isTrue();
+            assertThat(gateway.received(CloseCursor.class)).hasSize(1);
+            assertThat(second.next()).isTrue();
+            assertThat(second.getInt(1)).isEqualTo(1);
+            assertThat(s.getResultSet()).isSameAs(second);
+            SQLWarning w = s.getWarnings();
+            assertThat((Object) w).isNotNull(); // SQLException is Iterable<Throwable>: disambiguate
+            assertThat(w.getSQLState()).isEqualTo("01000");
+            assertThat(w.getMessage()).contains("could not be closed").contains("cursor bookkeeping failure");
+            assertThat(w.getCause()).isInstanceOf(SQLException.class);
+            assertThat(c.isClosed()).isFalse();
+
+            // the same before a batch: the batch runs, the close failure is a warning
+            s.clearWarnings();
+            s.addBatch("update t set x = 1");
+            assertThat(s.executeBatch()).containsExactly(1);
+            assertThat(gateway.received(CloseCursor.class)).hasSize(2);
+            assertThat(second.isClosed()).isTrue();
+            assertThat(s.getWarnings().getMessage()).contains("could not be closed");
         }
     }
 

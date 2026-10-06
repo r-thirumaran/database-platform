@@ -26,11 +26,14 @@ import java.sql.SQLNonTransientConnectionException;
 import java.sql.SQLWarning;
 import java.sql.Savepoint;
 import java.sql.Statement;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.entry;
+import static org.assertj.core.api.Assertions.tuple;
 
 class ConnectionTest extends GatewayTest {
 
@@ -185,6 +188,42 @@ class ConnectionTest extends GatewayTest {
 
             c.setClientInfo("ApplicationName", null);
             assertThat(c.getClientInfo("ApplicationName")).isNull();
+        }
+    }
+
+    @Test
+    void setClientInfoPropertiesReplacesTheWholeSet() throws Exception {
+        try (Connection c = connect()) {
+            c.setClientInfo("ApplicationName", "orders");
+            c.setClientInfo("ClientUser", "alice");
+            c.setClientInfo("ClientHostname", "h1");
+            gateway.clearReceived();
+
+            Properties props = new Properties();
+            props.setProperty("ClientUser", "bob");
+            props.setProperty("action", "checkout");
+            c.setClientInfo(props);
+
+            // JDBC: the given set replaces the current one. Entries no longer present are cleared (SET_CLIENT_INFO name
+            // null) before the new values are set
+            List<SetClientInfo> sent = gateway.received(SetClientInfo.class);
+            assertThat(sent).extracting(SetClientInfo::name, SetClientInfo::value).containsExactlyInAnyOrder(
+                    tuple("ApplicationName", null), tuple("ClientHostname", null), tuple("ClientUser", "bob"),
+                    tuple("action", "checkout"));
+            assertThat(sent.subList(0, 2)).extracting(SetClientInfo::value).containsOnlyNulls();
+            assertThat(c.getClientInfo()).containsOnly(entry("ClientUser", "bob"), entry("action", "checkout"));
+            assertThat(c.getClientInfo("ApplicationName")).isNull();
+            Map<String, String> remote = gateway.sessions().get(0).clientInfo;
+            assertThat(remote.get("ClientUser")).isEqualTo("bob");
+            assertThat(remote.get("ApplicationName")).isNull();
+            assertThat(remote.get("ClientHostname")).isNull();
+
+            // an empty set clears everything; failures while clearing are reported per name
+            gateway.clearReceived();
+            c.setClientInfo(new Properties());
+            assertThat(c.getClientInfo()).isEmpty();
+            assertThat(gateway.received(SetClientInfo.class)).extracting(SetClientInfo::name)
+                    .containsExactlyInAnyOrder("ClientUser", "action");
         }
     }
 

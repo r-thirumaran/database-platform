@@ -199,7 +199,9 @@ Downgraded with a `SQLWarning` (SQLState `01S02`) so framework defaults keep wor
 * **Result sets** receive the first `fetchSize` rows with the result-set header and pull the rest with
   `FETCH`. When the gateway flags the last batch the server closes the cursor; otherwise `close()` sends
   `CLOSE_CURSOR`. Closing a statement closes its result sets; closing the connection closes everything and
-  sends `CLOSE`. Reading past `setMaxRows` stops client-side as well.
+  sends `CLOSE`. Reading past `setMaxRows` stops client-side as well. Re-executing a statement closes its previous
+  result sets best-effort: a failure to close them (e.g. the gateway rejecting the `CLOSE_CURSOR`) never discards the
+  new execution's results, it is attached to the statement as a `SQLWarning` (`01000`).
 * **Commit/rollback with open cursors**: the gateway keeps the session pinned until the cursors close;
   whether the cursor survives is decided by the physical driver (Oracle keeps it, PostgreSQL closes
   non-holdable cursors) — read everything before committing.
@@ -216,6 +218,33 @@ Downgraded with a `SQLWarning` (SQLState `01S02`) so framework defaults keep wor
   is derived from the JDBC type accordingly (never a vendor class name).
 * `DatabaseMetaData.getURL()` is the **logical** URL resolved by the gateway; `getUserName()` the user the
   gateway reports.
+
+## Known limitations
+
+* **Failed batches lose the per-element update counts.** `executeBatch` throws `BatchUpdateException` with an *empty*
+  update-count array when any element fails: the protocol has no counts-with-error frame (roadmap). Applications that
+  need to know which elements succeeded must run the batch inside a transaction and roll back.
+* **PostgreSQL large objects (`oid`) are not supported.** `setBlob`/`setClob` bind the bytes/text (`bytea`/`text`), `oid`
+  columns arrive as numbers. Map Hibernate `@Lob` columns to `bytea`/`text` (`@JdbcTypeCode(SqlTypes.BINARY)` /
+  `SqlTypes.LONG32VARCHAR`) instead.
+* **HikariCP validation cost.** Hikari validates a connection on checkout (after `aliveBypassWindowMs`, 500 ms by
+  default) with `Connection.isValid`, which the driver answers with `setNetworkTimeout` (socket timeout set and restored,
+  2 calls) plus one `PING` round trip to the gateway. Leave `connectionTestQuery` **unset** (a test query would be a full
+  `EXECUTE` round trip plus a physical statement) and use a reasonable `maxLifetime` (e.g. 30 min, below the gateway's
+  `DBP_GATEWAY_IDLE_TIMEOUT_SECONDS`, 1800 s by default) so connections are recycled before the gateway closes them as
+  idle.
+* **`setNetworkTimeout` is forwarded to the physical connection.** It sets the driver socket's read timeout *and* is
+  sent to the gateway, which applies it to the physical connection while the session is pinned. The lower of the two hops
+  wins; a timeout is fatal for the logical connection (`08006`), the gateway evicts the physical connection.
+* **DST ambiguous hour.** `DATE`/`TIME`/`TIMESTAMP` travel zone-less and are rebuilt with the legacy `java.sql` bridges in
+  the JVM default zone. A wall time inside the DST overlap hour (e.g. 02:30 on the autumn change) is resolved like
+  `java.sql.Timestamp.valueOf` does (the earlier offset) on both hops, which can differ from the physical driver's choice by
+  one hour; run the gateway and the application in the same zone, preferably UTC, or use `java.time` accessors with
+  `TIMESTAMP WITH TIME ZONE` columns.
+* **`setClientInfo(Properties)` replaces the whole set** (JDBC): entries missing from the given properties are cleared on
+  the gateway (`SET_CLIENT_INFO name null`) before the new values are set.
+* **Gateway admin endpoints are unauthenticated by default** (`/health`, `/metrics`, `/sessions`, `/pools` on port
+  7421): the gateway must be bound to an internal interface (`DBP_GATEWAY_BIND`).
 
 ## Error SQLStates
 
@@ -245,7 +274,7 @@ feature not supported, `22` data, `23` integrity, `28` authorisation, `40` rollb
 | `01000`  | `SQLWarning`                          | `cancel()` ignored                                                       |
 
 `BatchUpdateException` wraps the gateway error of a failed `executeBatch` with an empty update-count array
-(the gateway does not report partial counts).
+(the gateway does not report partial counts; see [Known limitations](#known-limitations)).
 
 ## Logging
 

@@ -49,6 +49,14 @@ public interface Resolver extends AutoCloseable {
     default void addConfigListener(Runnable listener) {
     }
 
+    /**
+     * Datasource names known up front (static mode: every configured datasource), so that the per-datasource metrics
+     * can be registered at startup with zero values; empty when datasources are only learned from sessions.
+     */
+    default java.util.List<String> knownDatasources() {
+        return java.util.List.of();
+    }
+
     default void start() {
     }
 

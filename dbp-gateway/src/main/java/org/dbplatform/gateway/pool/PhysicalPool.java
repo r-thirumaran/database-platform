@@ -106,6 +106,11 @@ public final class PhysicalPool {
                 // the wire protocol carries UUID, JSON/JSONB, enums, intervals, ... as STRING and the gateway binds them
                 // with setString: let the server infer the parameter type instead of forcing varchar (42804 otherwise)
                 props.putIfAbsent("stringtype", "unspecified");
+                // pgjdbc's default readOnlyMode=transaction only guards explicit transactions: an autocommit UPDATE on a
+                // read-only connection would succeed. 'always' makes setReadOnly(true) apply
+                // SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY, so the server rejects writes in autocommit too
+                // (the gateway's own 25006 check for read-only grants runs before that, for every engine)
+                props.putIfAbsent("readOnlyMode", "always");
             }
             case MSSQL -> {
                 props.putIfAbsent("applicationName", program);

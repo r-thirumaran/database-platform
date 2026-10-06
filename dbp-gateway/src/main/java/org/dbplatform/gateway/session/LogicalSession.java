@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -45,7 +46,10 @@ import java.util.concurrent.locks.ReentrantLock;
  *   <li>{@link PoolMode#SESSION}: never release before CLOSE / socket EOF.</li>
  * </ul>
  *
- * <p>Instances are confined to the handler thread; the {@code volatile} fields are read by the admin endpoints.</p>
+ * <p>Instances are confined to the handler thread; the {@code volatile} fields are read by the admin endpoints. The
+ * handler holds the lifecycle lock for the duration of every request ({@link #beginRequest()} / {@link #endRequest()}),
+ * and the shutdown path closes a session only through {@link #closeIfIdle}: the physical connection can never be
+ * returned to the pool while a statement runs on it, and the release is idempotent.</p>
  */
 public final class LogicalSession {
 
@@ -79,7 +83,8 @@ public final class LogicalSession {
 
     private final SessionSettings settings = new SessionSettings();
     private final Map<Integer, PreparedEntry> prepared = new HashMap<>();
-    private final Map<Integer, CachedStatement> physicalStatements = new HashMap<>();
+    /** Physical statements cached while pinned: per registered statement id, one variant per generated-keys configuration. */
+    private final Map<Integer, List<CachedStatement>> physicalStatements = new HashMap<>();
     private final Map<Integer, Cursor> cursors = new LinkedHashMap<>();
     private final Map<String, Savepoint> savepoints = new HashMap<>();
     private final List<String> appliedClientInfo = new ArrayList<>();
@@ -88,6 +93,8 @@ public final class LogicalSession {
     private Connection physical;
     private PhysicalPool pinnedPool;
     private boolean inTransaction;
+    /** Whether a statement has actually run in the current transaction (state that would be lost with the connection). */
+    private boolean transactionWork;
     private long pinnedSinceMillis;
     private int nextStatementId = 1;
     private int nextCursorId = 1;
@@ -158,8 +165,19 @@ public final class LogicalSession {
         return executing;
     }
 
-    public void executing(boolean v) {
-        executing = v;
+    /**
+     * Marks the start of a request. The lifecycle lock is held until {@link #endRequest()} so that a concurrent
+     * {@link #closeIfIdle} (shutdown) can never hand the physical connection back to the pool while a statement runs
+     * on it; the handler thread itself re-enters the lock freely (release, close).
+     */
+    public void beginRequest() {
+        lifecycle.lock();
+        executing = true;
+    }
+
+    public void endRequest() {
+        executing = false;
+        lifecycle.unlock();
     }
 
     public boolean isClosed() {
@@ -412,6 +430,7 @@ public final class LogicalSession {
         pinnedPool = null;
         pinnedFlag = false;
         inTransaction = false;
+        transactionWork = false;
         pool.release(c, evict);
         if (pool.isDraining()) {
             pools.sweep();
@@ -434,6 +453,19 @@ public final class LogicalSession {
         statements++;
         if (!settings.autoCommit()) {
             inTransaction = true;
+            transactionWork = true;
+        }
+    }
+
+    /**
+     * Marks that a statement is about to run with autocommit off: the transaction starts with the <em>attempt</em>, not
+     * with its success. A failing first statement therefore keeps the session pinned, so the following ROLLBACK reaches
+     * the same physical connection and later statements see the database's own semantics (PostgreSQL: {@code 25P02}
+     * until the rollback) instead of silently continuing on another physical connection.
+     */
+    public void noteStatementAttempt() {
+        if (!settings.autoCommit()) {
+            inTransaction = true;
         }
     }
 
@@ -449,7 +481,8 @@ public final class LogicalSession {
         if (!looksLikeConnectionFailure(e)) {
             return false;
         }
-        boolean stateLost = inTransaction || poolMode == PoolMode.SESSION || !cursors.isEmpty();
+        // a transaction whose first statement is the one that just failed has nothing to lose: the session survives
+        boolean stateLost = transactionWork || poolMode == PoolMode.SESSION || !cursors.isEmpty();
         LOG.warn("session {}: physical connection failure ({} {}), evicting{}", id, e.getSQLState(), e.getMessage(),
                 stateLost ? "; session state lost" : "");
         release(true);
@@ -479,6 +512,7 @@ public final class LogicalSession {
         settings.autoCommit(autoCommit);
         if (autoCommit) {
             inTransaction = false;
+            transactionWork = false;
             savepoints.clear();
         }
         maybeRelease();
@@ -489,6 +523,7 @@ public final class LogicalSession {
             physical.commit();
         }
         inTransaction = false;
+        transactionWork = false;
         savepoints.clear();
         maybeRelease();
     }
@@ -499,6 +534,7 @@ public final class LogicalSession {
                 physical.rollback();
             }
             inTransaction = false;
+            transactionWork = false;
             savepoints.clear();
             maybeRelease();
             return;
@@ -609,30 +645,42 @@ public final class LogicalSession {
         for (int cid : toClose) {
             closeCursorInternal(cid);
         }
-        CachedStatement cs = physicalStatements.remove(statementId);
-        if (cs != null) {
-            closeQuietly(cs.statement());
+        List<CachedStatement> variants = physicalStatements.remove(statementId);
+        if (variants != null) {
+            for (CachedStatement cs : variants) {
+                closeQuietly(cs.statement());
+            }
         }
         maybeRelease();
     }
 
     /**
      * Returns the physical prepared/callable statement for a registered statement on the pinned connection, creating
-     * (and caching) it on first use or when the generated-keys configuration changed.
+     * (and caching) it on first use or when the generated-keys configuration differs from every cached variant.
+     *
+     * <p>A variant with another generated-keys configuration is <em>not</em> closed while an open cursor still reads
+     * from it: closing a {@code Statement} closes its {@code ResultSet}s, which would break a FETCH on the cursor of its
+     * last execution. Such variants stay cached until the cursor closes and a further variant is created, the registered
+     * statement is closed, or the connection is released.</p>
      */
     public PreparedStatement physicalStatement(PreparedEntry entry, int autoGeneratedKeys, List<String> keyColumns)
             throws SQLException {
         Connection c = acquire();
-        CachedStatement cached = physicalStatements.get(entry.id());
-        if (cached != null) {
+        List<CachedStatement> variants = physicalStatements.computeIfAbsent(entry.id(), k -> new ArrayList<>(1));
+        for (CachedStatement cached : variants) {
             if (cached.matches(autoGeneratedKeys, keyColumns)) {
                 return cached.statement();
             }
-            physicalStatements.remove(entry.id());
-            closeQuietly(cached.statement());
         }
+        variants.removeIf(cached -> {
+            if (statementShared(cached.statement())) {
+                return false; // a cursor still reads from it
+            }
+            closeQuietly(cached.statement());
+            return true;
+        });
         PreparedStatement ps = createStatement(c, entry.sql(), entry.kind(), autoGeneratedKeys, keyColumns);
-        physicalStatements.put(entry.id(), new CachedStatement(ps, autoGeneratedKeys, List.copyOf(keyColumns)));
+        variants.add(new CachedStatement(ps, autoGeneratedKeys, List.copyOf(keyColumns)));
         return ps;
     }
 
@@ -652,8 +700,10 @@ public final class LogicalSession {
     }
 
     private void closePhysicalStatements() {
-        for (CachedStatement cs : physicalStatements.values()) {
-            closeQuietly(cs.statement());
+        for (List<CachedStatement> variants : physicalStatements.values()) {
+            for (CachedStatement cs : variants) {
+                closeQuietly(cs.statement());
+            }
         }
         physicalStatements.clear();
     }
@@ -752,6 +802,38 @@ public final class LogicalSession {
         } finally {
             lifecycle.unlock();
         }
+    }
+
+    /**
+     * Shutdown path: closes the session unless its handler is executing a request (which holds the lifecycle lock).
+     * This method and the handler's own {@link #close()} both release under that lock and {@code closed} makes the
+     * release idempotent, so the physical connection is never handed back twice, nor while a statement runs on it.
+     *
+     * @param timeoutMillis how long to wait for the handler to finish its current request
+     * @return {@code false} when the handler still held the lock after {@code timeoutMillis}
+     */
+    public boolean closeIfIdle(long timeoutMillis) {
+        boolean locked;
+        try {
+            locked = lifecycle.tryLock(timeoutMillis, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        if (!locked) {
+            return false;
+        }
+        try {
+            close();
+            return true;
+        } finally {
+            lifecycle.unlock();
+        }
+    }
+
+    /** Whether the grant forces this session read-only (the gateway rejects writes before any physical call). */
+    public boolean isGrantReadOnly() {
+        return grantReadOnly;
     }
 
     static void closeQuietly(Statement st) {

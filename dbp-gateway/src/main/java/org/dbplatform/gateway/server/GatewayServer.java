@@ -131,9 +131,15 @@ public final class GatewayServer implements AutoCloseable {
         }
     }
 
+    /** Minimum time the handlers get to run their own cleanup once their sockets are closed. */
+    static final long MIN_HANDLER_DRAIN_NANOS = TimeUnit.SECONDS.toNanos(2);
+
     /**
-     * Graceful shutdown: stop accepting, wait up to {@code graceSeconds} for in-flight statements, then close every
-     * client socket.
+     * Graceful shutdown: (1) stop accepting; (2) wait up to {@code graceSeconds} for in-flight statements, so their
+     * responses reach the clients; (3) close every client socket, which unblocks the idle handlers (and fails the next
+     * write of a handler still executing) so that each handler runs its own cleanup and releases its session; (4) wait
+     * for the handler threads to terminate for the rest of the grace period, at least {@link #MIN_HANDLER_DRAIN_NANOS}.
+     * A handler still inside a physical driver call afterwards is reported; its connection is closed with the pool.
      */
     public void stop(int graceSeconds) {
         if (!stopping.compareAndSet(false, true)) {
@@ -163,8 +169,11 @@ public final class GatewayServer implements AutoCloseable {
             }
         }
         workers.shutdown();
+        long remaining = Math.max(deadline - System.nanoTime(), MIN_HANDLER_DRAIN_NANOS);
         try {
-            workers.awaitTermination(2, TimeUnit.SECONDS);
+            if (!workers.awaitTermination(remaining, TimeUnit.NANOSECONDS)) {
+                LOG.warn("{} session handler(s) still running after the shutdown grace period", open.size());
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }

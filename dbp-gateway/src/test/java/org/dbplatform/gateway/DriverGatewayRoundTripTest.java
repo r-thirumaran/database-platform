@@ -758,18 +758,20 @@ class DriverGatewayRoundTripTest {
         try (GatewayFixture idle = GatewayFixture.start(cfg, sc)) {
             Connection c = DriverManager.getConnection("jdbc:dbp://127.0.0.1:" + idle.port() + "/h2");
             assertThat(c.isValid(1)).isTrue();
-            Thread.sleep(1700);
+            assertThat(idle.gateway.sessions().size()).isEqualTo(1);
+            // wait for the gateway's idle timeout (1 s) to close the session instead of sleeping a fixed time: no
+            // timing margin to get wrong on a slow runner, and the gateway-side effect is asserted explicitly
+            long deadline = System.currentTimeMillis() + 30_000;
+            while (idle.gateway.sessions().size() > 0 && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20);
+            }
+            assertThat(idle.gateway.sessions().size()).as("the idle timeout closed the session on the gateway").isZero();
             assertThatThrownBy(() -> c.createStatement().executeQuery("SELECT 1"))
                     .isInstanceOf(SQLNonTransientConnectionException.class)
                     .satisfies(e -> assertThat(((SQLException) e).getSQLState()).startsWith("08"));
             assertThat(c.isClosed()).isTrue();
             assertThat(c.isValid(1)).isFalse();
             assertThatThrownBy(c::createStatement).isInstanceOf(SQLNonTransientConnectionException.class);
-            long deadline = System.currentTimeMillis() + 5000;
-            while (idle.gateway.sessions().size() > 0 && System.currentTimeMillis() < deadline) {
-                Thread.sleep(20);
-            }
-            assertThat(idle.gateway.sessions().size()).isZero();
             assertThatCode(c::close).doesNotThrowAnyException();
         }
     }

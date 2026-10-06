@@ -57,6 +57,7 @@ import java.net.SocketTimeoutException;
 import java.sql.SQLException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.function.BooleanSupplier;
 
@@ -150,8 +151,9 @@ public final class SessionHandler implements Runnable {
         } catch (IOException e) {
             LOG.debug("{}: I/O error: {}", peer, e.toString());
         } catch (RuntimeException e) {
-            LOG.error("{}: unexpected error in session {}", peer, session != null ? session.id() : "-", e);
-            sendQuietly(ErrorMessage.fatal(ErrorMessage.STATE_GENERAL, "internal gateway error: " + e));
+            String ref = errorRef();
+            LOG.warn("{}: unexpected error in session {} [ref {}]", peer, session != null ? session.id() : "-", ref, e);
+            sendQuietly(ErrorMessage.fatal(ErrorMessage.STATE_GENERAL, internalError(ref)));
         } finally {
             closeSession();
             try {
@@ -272,7 +274,7 @@ public final class SessionHandler implements Runnable {
     /** Handles one request; returns {@code false} when the session must end. */
     private boolean dispatch(Message m, StatementExecutor executor) throws IOException {
         session.touch();
-        session.executing(true);
+        session.beginRequest();
         try {
             switch (m) {
                 case Ping p -> Messages.write(out, new Pong());
@@ -360,11 +362,12 @@ public final class SessionHandler implements Runnable {
             metrics.recordError(ErrorMessage.STATE_GENERAL);
             Messages.write(out, ErrorMessage.of(ErrorMessage.STATE_GENERAL, e.getMessage()));
         } catch (RuntimeException e) {
-            LOG.error("session {}: internal error handling {}", session.id(), m.type(), e);
+            String ref = errorRef();
+            LOG.warn("session {}: internal error handling {} [ref {}]", session.id(), m.type(), ref, e);
             metrics.recordError(ErrorMessage.STATE_GENERAL);
-            Messages.write(out, ErrorMessage.of(ErrorMessage.STATE_GENERAL, "internal gateway error: " + e));
+            Messages.write(out, ErrorMessage.of(ErrorMessage.STATE_GENERAL, internalError(ref)));
         } finally {
-            session.executing(false);
+            session.endRequest();
         }
         return true;
     }
@@ -378,6 +381,18 @@ public final class SessionHandler implements Runnable {
         }
         String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
         return new ErrorMessage(state, e.getErrorCode(), msg, false);
+    }
+
+    /**
+     * Short correlation id: the client gets a generic message carrying it, the gateway log (WARN) holds the exception
+     * class, message and stack trace under the same id. Exception details never travel to the client.
+     */
+    static String errorRef() {
+        return UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    static String internalError(String ref) {
+        return "internal gateway error (ref " + ref + "), see the gateway log";
     }
 
     private void sendFatal(String sqlState, String message) throws IOException {

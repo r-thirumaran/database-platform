@@ -46,7 +46,14 @@ cached physical `PreparedStatement`s closed, client info reset to the pool basel
 isolation / read-only / catalog / schema / network timeout to its defaults.
 
 Physical `PreparedStatement`s are created lazily at EXECUTE time (PREPARE never touches the database) and
-cached per (session, statementId) only while the session stays pinned.
+cached per (session, statementId, generated-keys configuration) only while the session stays pinned. A variant with a
+different generated-keys configuration is never closed while a cursor of its last execution is still open.
+
+**A transaction starts with the first statement *attempted* with autocommit off, even when that statement fails.** The
+session stays pinned, so the following `ROLLBACK` reaches the same physical connection and later statements see the
+database's own semantics (PostgreSQL answers `25P02 current transaction is aborted` until the rollback, Oracle and H2
+carry on) — exactly what a direct connection does. Only a *connection* failure on that first statement is reported as a
+plain (non-fatal) error: nothing was lost, the next statement borrows a fresh connection.
 
 ### Pool modes
 
@@ -114,7 +121,7 @@ DBP_GATEWAY_CONFIG=/etc/dbp/gateway.yaml java -jar dbp-gateway-0.1.0-SNAPSHOT-al
 | `DBP_GATEWAY_ROWS_FRAME_SOFT_BYTES`   | `4194304` (4 MiB)        | a ROWS frame stops early (fewer rows than `fetchSize`) beyond this size |
 | `DBP_GATEWAY_MAX_SESSIONS`            | `0` (unlimited)          | global cap of logical sessions (`08004` "too many logical connections") |
 | `DBP_GATEWAY_MAX_OPEN_CURSORS`        | `256`                    | open cursors per session (`HY000` beyond)                               |
-| `DBP_GATEWAY_SHUTDOWN_GRACE_SECONDS`  | `20`                     | wait for in-flight statements on shutdown                               |
+| `DBP_GATEWAY_SHUTDOWN_GRACE_SECONDS`  | `20`                     | wait for in-flight statements on shutdown (see [Shutdown](#shutdown))   |
 | `DBP_CONTROL_PLANE_URL`               | –                        | control plane base URL; unset = static mode                             |
 | `DBP_SERVICE_TOKEN`                   | `dev-service-token`      | `X-DBP-Service-Token` for `/internal/*`                                 |
 | `DBP_GATEWAY_CONFIG`                  | –                        | static YAML file (static mode)                                          |
@@ -188,11 +195,16 @@ The full example ships as `src/main/resources/gateway-example.yaml`.
 |----------------------------------------------------------|------------------------------------|
 | `dbp_gateway_logical_sessions`                           | `datasource`                       |
 | `dbp_gateway_pinned_sessions`                            | `datasource`                       |
-| `dbp_gateway_pool_active` / `_idle` / `_waiting` / `_total` / `_max` | `datasource`           |
+| `dbp_gateway_pool_active` / `_idle` / `_waiting` / `_connections` / `_max` | `datasource`     |
 | `dbp_gateway_statements_total`                           | `datasource`, `operation`, `success` |
 | `dbp_gateway_statement_duration_seconds` (histogram: `_bucket`, `_count`, `_sum`, `_max`) | `datasource` |
 | `dbp_gateway_errors_total` (every ERROR frame sent, incl. rejected HELLOs) | `sqlstate`         |
 | `dbp_gateway_telemetry_dropped_total`                    | –                                  |
+
+`dbp_gateway_pool_connections` is the total number of physical connections of the datasource's pools (the Prometheus
+exposition format strips a `_total` suffix from gauges, so the metric cannot be called `dbp_gateway_pool_total`).
+The per-datasource gauges are registered with zero values at startup for every datasource of the static configuration
+(and at the first HELLO for datasources learned from the control plane), so dashboards see every datasource right away.
 
 ## Telemetry
 
@@ -202,6 +214,22 @@ routines, columns), duration, rows (update count, rows of the first batch for qu
 success/SQLState/vendor code/message, `pinned` (the session was pinned *before* the statement), pool mode,
 client info and the default schema (session schema or the pool user's schema). `PoolStats` are reported
 every `DBP_POOL_STATS_SECONDS`, heartbeats every `DBP_HEARTBEAT_SECONDS`.
+
+## Shutdown
+
+`Gateway.stop()` (SIGTERM) proceeds in this order:
+
+1. stop accepting; new HELLOs are answered with fatal `08006 gateway is shutting down`;
+2. wait up to `DBP_GATEWAY_SHUTDOWN_GRACE_SECONDS` for in-flight statements, so their responses reach the clients;
+3. close the client sockets: idle handlers unblock and release their sessions themselves (rollback, reset, return to
+   the pool); a handler still executing fails on its next write and does the same when its driver call returns;
+4. wait for the handler threads for the rest of the grace period (at least 2 s);
+5. close whatever session is still registered — but only when its handler is not executing: a session's own cleanup and
+   the shutdown path both release under the session lock and the release is idempotent, so a physical connection is never
+   returned to the pool twice, nor while a statement still runs on it;
+6. flush telemetry, close the pools (which aborts the connection of a handler still stuck in a driver call).
+
+Worst case the shutdown takes the grace period plus 2 s.
 
 ## Sizing guidance
 
@@ -237,6 +265,8 @@ every `DBP_POOL_STATS_SECONDS`, heartbeats every `DBP_HEARTBEAT_SECONDS`.
 * COMMIT/ROLLBACK with autocommit on are no-ops (OK); CLOSE_CURSOR of an unknown cursor is OK; FETCH of an
   unknown/closed cursor, unknown statement/savepoint ids are `HY000`. Unnamed savepoints are named `DBP_SP_<n>`.
 * `PREPARED.parameterCount` is always `-1`.
+* Unexpected gateway failures are reported as `HY000 internal gateway error (ref <id>)`: the exception class, message and
+  stack trace never travel to the client, they are in the gateway log at WARN under the same `ref`.
 * With `expect = ANY`, when the first result set is not exhausted by the first ROWS frame and the physical driver
   cannot `getMoreResults(KEEP_CURRENT_RESULT)`, further results of that execution are not delivered.
 
@@ -247,9 +277,12 @@ every `DBP_POOL_STATS_SECONDS`, heartbeats every `DBP_HEARTBEAT_SECONDS`.
   (`search_path`, `statement_timeout`, …), `ALTER SESSION`, Oracle package state, `DBMS_OUTPUT` buffers, prepared
   server-side cursors. Applications that rely on any of these need a grant in `SESSION` mode. What *is* reset on release:
   autocommit, isolation, read-only, schema/catalog (when changed through JDBC), client info, network timeout, warnings.
-* A grant's `readOnly` is enforced with `Connection.setReadOnly(true)` on the physical connection, i.e. as strictly as
-  the physical driver/database enforces it (PostgreSQL rejects writes, Oracle starts read-only transactions, H2 treats it
-  as a hint). It is not a SQL-level write filter.
+* A grant's `readOnly` is enforced in two layers. The gateway rejects `INSERT`, `UPDATE`, `DELETE`, `MERGE` and DDL (as
+  classified by `SqlAnalyzer`) with SQLState `25006` before the physical connection is touched, for every engine. In
+  addition `Connection.setReadOnly(true)` is set on the physical connection (PostgreSQL pools get `readOnlyMode=always`,
+  so the server rejects writes in autocommit statements too; Oracle starts read-only transactions; H2 treats it as a
+  hint). Writes hidden in routines (`CALL`), anonymous blocks or vendor syntax the analyzer does not classify are caught
+  only by that second layer.
 * No XA / distributed transactions.
 * Cursors are forward-only, read-only; no scrollable or updatable result sets, no holdable cursors across
   COMMIT beyond what the physical driver offers (section 4.8).
@@ -269,7 +302,22 @@ every `DBP_POOL_STATS_SECONDS`, heartbeats every `DBP_HEARTBEAT_SECONDS`.
   cutover can `getObject(i, LocalDate/LocalDateTime.class)` differ from a direct connection's `java.time` accessors by that
   historical delta.
 * A `BatchUpdateException` of the physical driver is reported as a plain ERROR: per-element update counts of a partially
-  executed batch are not delivered.
+  executed batch are not delivered (the protocol has no counts-with-error frame; a `BATCH_RESULT`-with-error frame is
+  on the roadmap).
+* PostgreSQL large objects (`oid` columns, `Blob`/`Clob` locators, Hibernate `@Lob` on PostgreSQL) are not supported:
+  LOB parameters are bound as `bytea`/`text` values and `oid` columns arrive as the plain `oid` number.
+* `Connection.setNetworkTimeout` set by the application is forwarded to the physical connection while the session is
+  pinned (and reset on release), so the physical driver's own read timeout fires with it; the lower of the two hops wins
+  and a timeout is fatal for the logical connection (`08006`).
+* `DATE` / `TIME` / `TIMESTAMP` travel zone-less and are rebuilt with the legacy `java.sql` bridges in the gateway's and the
+  application's default zone. A wall time inside the DST overlap hour (e.g. 02:30 on the autumn change) is ambiguous:
+  both sides resolve it like `java.sql.Timestamp.valueOf` does (the earlier offset), which can differ from the physical
+  driver's choice by one hour. Run gateway and applications in the same zone, preferably UTC.
+* The admin endpoints (`/health`, `/metrics`, `/sessions`, `/pools`) are unauthenticated by default: bind
+  `DBP_GATEWAY_BIND` to an internal interface (or restrict the admin port with a network policy) and expose them only
+  through the platform proxy / control plane.
+* `Connection.isValid` costs one PING round trip; application pools validating on every checkout (Hikari does, after
+  `aliveBypassWindowMs`) add that latency per checkout — see the driver README for the recommended Hikari settings.
 
 ## Build and test
 

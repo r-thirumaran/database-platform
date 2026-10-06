@@ -385,6 +385,39 @@ class H2GatewayTest {
     }
 
     @Test
+    void failedFirstStatementOfATransactionKeepsTheSessionPinned() {
+        try (TestClient c = gw.client("h2")) {
+            c.autoCommit(false);
+            assertThatThrownBy(() -> c.update("INSERT INTO no_such_table VALUES (1)"))
+                    .isInstanceOf(TestClient.SqlError.class)
+                    .satisfies(t -> assertThat(((TestClient.SqlError) t).sqlState()).isEqualTo("42S02"));
+            // the transaction starts with the attempt, not with a successful statement: the session stays on its
+            // physical connection, so the following statements and the ROLLBACK reach the same connection (PostgreSQL
+            // would answer 25P02 for the statements until the rollback, like a direct connection does)
+            assertThat(session(c).isPinned()).as("a failing first statement pins like a successful one").isTrue();
+            assertThat(session(c).inTransaction()).isTrue();
+            c.update("INSERT INTO tx_t VALUES (?, ?)", 400, "after failure");
+            c.rollback();
+            assertThat(session(c).isPinned()).isFalse();
+            assertThat(session(c).inTransaction()).isFalse();
+            assertThat(c.query("SELECT COUNT(*) FROM tx_t WHERE id = 400").scalar()).isEqualTo(0L);
+            c.rollback();
+            // ROLLBACK right after the failure releases the pin as well
+            assertThatThrownBy(() -> c.update("INSERT INTO no_such_table VALUES (1)")).isInstanceOf(TestClient.SqlError.class);
+            assertThat(session(c).isPinned()).isTrue();
+            c.rollback();
+            assertThat(session(c).isPinned()).isFalse();
+            // the same for a prepared batch
+            int stmt = c.prepare("INSERT INTO no_such_table VALUES (?)", StatementKind.PREPARED);
+            assertThatThrownBy(() -> c.batch(ExecuteBatch.ofPrepared(stmt, StatementKind.PREPARED, List.of(List.<Object>of(1)))))
+                    .isInstanceOf(TestClient.SqlError.class);
+            assertThat(session(c).isPinned()).isTrue();
+            c.autoCommit(true);
+            assertThat(session(c).isPinned()).isFalse();
+        }
+    }
+
+    @Test
     void sixthTransactionOnFullPoolGets08001AfterConnectionTimeout() {
         List<TestClient> holders = new ArrayList<>();
         try {
@@ -405,7 +438,9 @@ class H2GatewayTest {
                             assertThat(((TestClient.SqlError) t).fatal()).isFalse();
                         });
                 long ms = (System.nanoTime() - t0) / 1_000_000;
-                assertThat(ms).isBetween(400L, 5000L);
+                // the lower bound proves the pool waited for its connectionTimeout (500 ms) before answering 08001; the
+                // upper bound only guards against a hang and is generous for slow CI runners
+                assertThat(ms).isBetween(400L, 20_000L);
                 holders.get(0).rollback();
                 sixth.update("INSERT INTO tx_t VALUES (?, ?)", 299, "x"); // now a connection is free
                 sixth.rollback();
@@ -620,6 +655,36 @@ class H2GatewayTest {
             assertThat(session(c).isPinned()).isFalse();
             ErrorMessage e = c.expectError(new Fetch(r.result().cursorId(), 1));
             assertThat(e.sqlState()).isEqualTo("HY000");
+        }
+    }
+
+    @Test
+    void switchingGeneratedKeyOptionsKeepsTheCursorOfThePreviousExecutionOpen() {
+        try (TestClient c = gw.client("h2")) {
+            int stmt = c.prepare("SELECT n FROM nums ORDER BY n", StatementKind.PREPARED);
+            // fetchSize 2 leaves a cursor open on the physical statement created without generated keys
+            TestClient.ExecResult first = c.execute(Execute.prepared(stmt, StatementKind.PREPARED, List.of(),
+                    new Execute.ExecOptions(0, 2, 0, Execute.Expect.QUERY, Statement.NO_GENERATED_KEYS, List.of())));
+            assertThat(first.result().last()).isFalse();
+            assertThat(first.rows()).extracting(r -> r.get(0)).containsExactly(1, 2);
+            // the same registered statement executed with another generated-keys configuration needs a new physical
+            // statement; the previous one must not be closed while its cursor is still open
+            TestClient.ExecResult second = c.execute(Execute.prepared(stmt, StatementKind.PREPARED, List.of(),
+                    new Execute.ExecOptions(0, 10, 0, Execute.Expect.QUERY, Statement.RETURN_GENERATED_KEYS, List.of())));
+            assertThat(second.result().last()).isTrue();
+            assertThat(second.rows()).hasSize(5);
+            // the first cursor is still alive and continues where it stopped
+            Rows more = c.fetch(first.result().cursorId(), 2, 1);
+            assertThat(more.rows()).extracting(r -> r.get(0)).containsExactly(3, 4);
+            assertThat(more.last()).isFalse();
+            Rows rest = c.fetch(first.result().cursorId(), 2, 1);
+            assertThat(rest.rows()).extracting(r -> r.get(0)).containsExactly(5);
+            assertThat(rest.last()).isTrue();
+            assertThat(session(c).openCursors()).isZero();
+            // both variants keep working afterwards
+            assertThat(c.executePrepared(stmt, Execute.Expect.QUERY).rows()).hasSize(5);
+            c.closeStatement(stmt);
+            assertThat(session(c).isPinned()).isFalse();
         }
     }
 

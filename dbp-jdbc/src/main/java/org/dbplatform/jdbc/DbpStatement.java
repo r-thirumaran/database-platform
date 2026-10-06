@@ -34,6 +34,7 @@ import java.util.Set;
 public class DbpStatement extends DbpWrapper implements Statement {
 
     private static final String STATE_CANCEL_IGNORED = "01000";
+    private static final String STATE_GENERAL_WARNING = "01000";
 
     protected final DbpConnection connection;
     protected final DbpWarningChain warnings = new DbpWarningChain();
@@ -96,15 +97,25 @@ public class DbpStatement extends DbpWrapper implements Statement {
     private void install(ExecutionResult result) throws SQLException {
         installing = true;
         try {
-            closeAllResultSets();
+            // the EXECUTE already succeeded: a failure while closing the previous result sets (e.g. the gateway rejecting
+            // a CLOSE_CURSOR) must not discard the new results; it is attached as a warning instead
+            SQLException closeFailure = closeAllResultSetsQuietly();
             generatedKeys = result.generatedKeys;
             warnings.addAll(result.warnings);
+            if (closeFailure != null) {
+                warnings.add(previousResultsWarning(closeFailure));
+            }
             items = filterItems(result);
             itemIndex = -1;
             advance();
         } finally {
             installing = false;
         }
+    }
+
+    private static SQLWarning previousResultsWarning(SQLException cause) {
+        return new SQLWarning("a previous result set of this statement could not be closed: " + cause.getMessage(),
+                STATE_GENERAL_WARNING, cause.getErrorCode(), cause);
     }
 
     /** Hook for subclasses to remove result items that are not navigable (cursor-typed OUT parameters). */
@@ -139,6 +150,14 @@ public class DbpStatement extends DbpWrapper implements Statement {
     }
 
     private void closeAllResultSets() throws SQLException {
+        SQLException first = closeAllResultSetsQuietly();
+        if (first != null) {
+            throw first;
+        }
+    }
+
+    /** Closes every open result set (best effort) and returns the first failure, with the others chained, or null. */
+    private SQLException closeAllResultSetsQuietly() {
         List<DbpResultSet> toClose;
         synchronized (openResultSets) {
             toClose = new ArrayList<>(openResultSets);
@@ -155,9 +174,7 @@ public class DbpStatement extends DbpWrapper implements Statement {
                 }
             }
         }
-        if (first != null) {
-            throw first;
-        }
+        return first;
     }
 
     /** Called by a result set when it closes. */
@@ -406,10 +423,14 @@ public class DbpStatement extends DbpWrapper implements Statement {
     /** Sends an EXECUTE_BATCH and returns its counts; failures become {@link BatchUpdateException}. */
     protected final long[] runBatch(ExecuteBatch request) throws SQLException {
         installing = true;
+        SQLException closeFailure;
         try {
-            closeAllResultSets();
+            closeFailure = closeAllResultSetsQuietly();
         } finally {
             installing = false;
+        }
+        if (closeFailure != null) {
+            warnings.add(previousResultsWarning(closeFailure)); // best effort: the batch itself still runs
         }
         items = List.of();
         itemIndex = 0;

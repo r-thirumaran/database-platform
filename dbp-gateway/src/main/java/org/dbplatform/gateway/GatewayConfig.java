@@ -148,6 +148,13 @@ public record GatewayConfig(
                 tlsKeystore, tlsKeystorePassword);
     }
 
+    public GatewayConfig withShutdownGraceSeconds(int s) {
+        return new GatewayConfig(gatewayId, port, adminPort, bindAddress, advertisedHost, idleTimeoutSeconds, maxFrameBytes,
+                rowsFrameSoftBytes, maxSessions, maxOpenCursorsPerSession, s, controlPlaneUrl,
+                serviceToken, staticConfigFile, authCacheSeconds, configPollSeconds, poolStatsSeconds, heartbeatSeconds,
+                tlsKeystore, tlsKeystorePassword);
+    }
+
     public GatewayConfig withMaxFrameBytes(int n) {
         return new GatewayConfig(gatewayId, port, adminPort, bindAddress, advertisedHost, idleTimeoutSeconds, n,
                 rowsFrameSoftBytes, maxSessions, maxOpenCursorsPerSession, shutdownGraceSeconds, controlPlaneUrl,
