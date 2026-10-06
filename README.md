@@ -207,10 +207,10 @@ Full report with environment, per-test evidence and defect list: [docs/validatio
 
 | Layer                                   | How it was tested                                                                                      | Result |
 |-----------------------------------------|--------------------------------------------------------------------------------------------------------|--------|
-| Wire protocol codec                     | 258 round-trip unit tests                                                                              | pass   |
+| Wire protocol codec                     | 261 round-trip unit tests                                                                              | pass   |
 | Common library (SQL analyser, clients)  | 217 unit tests incl. 118 SQL statements across Oracle / PostgreSQL / SQL Server dialects               | pass   |
-| JDBC driver                             | 68 tests against a scriptable fake gateway; real-driver round trips (below)                            | pass   |
-| Gateway                                 | 60+ tests on H2 (incl. Oracle mode) and embedded PostgreSQL: pinning rules, 50 logical sessions on a 5-connection pool, callable OUT and ref-cursor parameters, rotation, TLS, plus 21 real-driver round-trip tests (value matrix, time zones, metadata, errors) | pass |
+| JDBC driver                             | 70 tests against a scriptable fake gateway; real-driver round trips (below)                            | pass   |
+| Gateway                                 | 70 tests on H2 (incl. Oracle mode) and embedded PostgreSQL: pinning rules, 50 logical sessions on a 5-connection pool, callable OUT and ref-cursor parameters, rotation, TLS, plus 21 real-driver round-trip tests (value matrix, time zones, metadata, errors) | pass |
 | Proxy                                   | 64 tests: synthetic TNS packets (inline/deferred connect strings, REDIRECT, RESEND, REFUSE), real PostgreSQL end to end through the proxy incl. `pg_stat_activity.client_port` correlation and quota refusals | pass |
 | Control plane                           | Spring Boot test suite (REST contract, telemetry ingestion, CALL expansion, graph, impact, governance, import/export, Flyway on embedded PostgreSQL) | pass |
 | UI                                      | lint, type check, unit tests, Playwright walkthrough of every page and mutation against the **real** control plane (18/18) and the mock (18/18) | pass |
