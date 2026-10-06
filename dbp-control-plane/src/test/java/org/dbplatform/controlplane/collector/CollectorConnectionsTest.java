@@ -74,6 +74,43 @@ class CollectorConnectionsTest {
     }
 
     @Test
+    void tlsTrustAndClientCertificateSettingsAreKeptSessionSettingsAreDropped() {
+        Map<String, String> corporate = new LinkedHashMap<>();
+        corporate.put("encrypt", "true");
+        corporate.put("trustStore", "/certs/corp-ca.jks");
+        corporate.put("trustStorePassword", "changeit");
+        corporate.put("trustStoreType", "JKS");
+        corporate.put("hostNameInCertificate", "*.db.corp.example");
+        corporate.put("serverCertificate", "/certs/server.pem");
+        corporate.put("trustManagerClass", "com.example.TrustAll");
+        corporate.put("trustManagerConstructorArg", "arg");
+        corporate.put("fips", "true");
+        corporate.put("clientCertificate", "/certs/client.pem");
+        corporate.put("clientKey", "/certs/client.key");
+        corporate.put("clientKeyPassword", "secret");
+        corporate.put("javax.net.ssl.trustStore", "/certs/ora-truststore.jks");
+        corporate.put("javax.net.ssl.keyStorePassword", "changeit");
+        corporate.put("oracle.net.wallet_location", "(SOURCE=(METHOD=FILE)(METHOD_DATA=(DIRECTORY=/wallet)))");
+        corporate.put("currentSchema", "sales");
+        corporate.put("selectMethod", "cursor");
+        for (Enums.Engine engine : new Enums.Engine[]{Enums.Engine.MSSQL, Enums.Engine.ORACLE, Enums.Engine.POSTGRES}) {
+            Properties p = CollectorConnections.properties(db(engine, corporate), "c", "s", 10);
+            assertThat(p.stringPropertyNames()).as(engine.name()).doesNotContain("currentSchema", "selectMethod");
+            for (String kept : corporate.keySet()) {
+                if (kept.equals("currentSchema") || kept.equals("selectMethod")) continue;
+                assertThat(p.getProperty(kept)).as("%s keeps %s", engine, kept).isEqualTo(corporate.get(kept));
+            }
+        }
+        // the case the review named: encrypt + trustStore + trustStorePassword survive, currentSchema does not
+        Properties p = CollectorConnections.properties(db(Enums.Engine.MSSQL, Map.of(
+                "encrypt", "true", "trustStore", "/certs/corp-ca.jks", "trustStorePassword", "changeit", "currentSchema", "sales")), "c", "s", 10);
+        assertThat(p.getProperty("encrypt")).isEqualTo("true");
+        assertThat(p.getProperty("trustStore")).isEqualTo("/certs/corp-ca.jks");
+        assertThat(p.getProperty("trustStorePassword")).isEqualTo("changeit");
+        assertThat(p.stringPropertyNames()).doesNotContain("currentSchema");
+    }
+
+    @Test
     void everyEngineIsHandled() {
         for (Enums.Engine engine : Enums.Engine.values()) {
             assertThat(CollectorConnections.properties(db(engine, Map.of("url", "jdbc:x:y", "sslmode", "require")), "u", "p", 5).getProperty("sslmode")).isEqualTo("require");

@@ -1,4 +1,8 @@
 spring:
+  jpa:
+    properties:
+      # records the SQL Hibernate issues while a test holds a SqlRecorder.Capture (regression tests for spurious updates)
+      hibernate.session_factory.statement_inspector: org.dbplatform.controlplane.SqlRecorder
   datasource:
     url: jdbc:h2:mem:dbp-test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1
     username: sa

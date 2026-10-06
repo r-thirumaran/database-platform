@@ -41,7 +41,9 @@ import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Governance: the five policies of docs/control-plane-api.md §11 evaluated against relationships,
@@ -60,11 +62,19 @@ public class GovernanceService {
     private final AccessGrantRepository grants;
     private final DatasourceRepository datasources;
     private final DbpProperties props;
+    /** Read phase of an evaluation: read-only (no flush, no dirty checking of the entities it loads). */
+    private final TransactionTemplate readTx;
+    /** Write phase of an evaluation: short, only the rows that really change. */
+    private final TransactionTemplate writeTx;
 
     public GovernanceService(PolicyRepository policies, ViolationRepository violations, RelationshipRepository relationships, DbTableRepository tables,
-                             RoutineRepository routines, ApplicationRepository applications, AccessGrantRepository grants, DatasourceRepository datasources, DbpProperties props) {
+                             RoutineRepository routines, ApplicationRepository applications, AccessGrantRepository grants, DatasourceRepository datasources, DbpProperties props,
+                             PlatformTransactionManager txManager) {
         this.policies = policies; this.violations = violations; this.relationships = relationships; this.tables = tables; this.routines = routines;
         this.applications = applications; this.grants = grants; this.datasources = datasources; this.props = props;
+        this.writeTx = new TransactionTemplate(txManager);
+        this.readTx = new TransactionTemplate(txManager);
+        this.readTx.setReadOnly(true);
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -125,10 +135,25 @@ public class GovernanceService {
 
     public record EvaluationResult(int open, int resolved, int inferredProducers) {}
 
-    /** Recomputes all violations; new ones are OPEN, vanished ones become RESOLVED, ACKNOWLEDGED is preserved. */
-    @Transactional
+    /**
+     * Recomputes all violations; new ones are OPEN, vanished ones become RESOLVED, ACKNOWLEDGED is preserved.
+     * <p>Three short phases instead of one long read-write transaction: (1) default policies (writes only when one is missing),
+     * (2) the whole computation in a <em>read-only</em> transaction (nothing it loads is flushed or dirty-checked, so applications,
+     * tables and datasources are never rewritten and never row-locked by an evaluation), (3) one short write transaction that applies the
+     * result (violations, inferred producers re-checked against the freshly loaded table).
+     */
     public EvaluationResult evaluate() {
-        ensureDefaultPolicies();
+        writeTx.executeWithoutResult(s -> ensureDefaultPolicies());
+        Computed computed = readTx.execute(s -> compute());
+        return writeTx.execute(s -> apply(computed));
+    }
+
+    /** Result of the read phase: the violations found, and the producers to infer (ids only, nothing managed leaves the read transaction). */
+    private record Computed(Map<String, Violation> found, List<ProducerInference> inferences, Instant now) {}
+
+    private record ProducerInference(String tableId, String applicationId, String applicationTeamId) {}
+
+    private Computed compute() {
         Map<PolicyKind, Policy> pol = new HashMap<>();
         policies.findAll().forEach(p -> pol.put(p.getKind(), p));
         Map<String, Application> apps = new HashMap<>();
@@ -209,6 +234,12 @@ public class GovernanceService {
             }
         }
 
+        return new Computed(found, inferProducers(rels, tbls, apps), now);
+    }
+
+    private EvaluationResult apply(Computed computed) {
+        Instant now = computed.now();
+        Map<String, Violation> found = computed.found();
         int open = 0, resolved = 0;
         Map<String, Violation> existing = new HashMap<>();
         violations.findAll().forEach(v -> existing.put(v.getFingerprint(), v));
@@ -229,37 +260,50 @@ public class GovernanceService {
         for (Violation stale : existing.values()) {
             if (stale.getStatus() != ViolationStatus.RESOLVED) { stale.setStatus(ViolationStatus.RESOLVED); violations.save(stale); resolved++; }
         }
-        int inferred = inferProducers(rels, tbls, apps);
+        int inferred = applyProducers(computed.inferences());
         return new EvaluationResult(open, resolved, inferred);
     }
 
-    /** Table written by exactly one application (direct runtime writes) → INFERRED producer, never overwriting a DECLARED one. */
-    private int inferProducers(List<Relationship> rels, Map<String, DbTable> tbls, Map<String, Application> apps) {
+    /** Table written by exactly one application (direct runtime writes) → INFERRED producer, never overwriting a DECLARED one. Read-only. */
+    private List<ProducerInference> inferProducers(List<Relationship> rels, Map<String, DbTable> tbls, Map<String, Application> apps) {
         Map<String, Set<String>> writers = new HashMap<>();
         for (Relationship r : rels) {
             if (r.getObjectType() == ObjectType.TABLE && r.getKind() == RelationshipKind.WRITES && r.getSource() != RelationshipSource.DECLARED) {
                 writers.computeIfAbsent(r.getObjectId(), k -> new HashSet<>()).add(r.getApplicationId());
             }
         }
-        int n = 0;
+        List<ProducerInference> out = new ArrayList<>();
         for (DbTable t : tbls.values()) {
             if (t.getProducerSource() == Enums.OwnerSource.DECLARED && t.getProducerApplicationId() != null) continue;
             Set<String> w = writers.get(t.getId());
             if (w != null && w.size() == 1) {
                 String appId = w.iterator().next();
                 if (!appId.equals(t.getProducerApplicationId())) {
-                    t.setProducerApplicationId(appId);
-                    t.setProducerSource(Enums.OwnerSource.INFERRED);
                     Application a = apps.get(appId);
-                    if (t.getOwnerTeamId() == null && a != null && a.getTeamId() != null) {
-                        t.setOwnerTeamId(a.getTeamId());
-                        t.setOwnerSource(Enums.OwnerSource.INFERRED);
-                        t.setOwnerConfirmed(false);
-                    }
-                    tables.save(t);
-                    n++;
+                    out.add(new ProducerInference(t.getId(), appId, a == null ? null : a.getTeamId()));
                 }
             }
+        }
+        return out;
+    }
+
+    /** Applies the inferences to freshly loaded tables (re-checking the conditions: the table may have been curated since the read phase). */
+    private int applyProducers(List<ProducerInference> inferences) {
+        int n = 0;
+        for (ProducerInference inf : inferences) {
+            DbTable t = tables.findById(inf.tableId()).orElse(null);
+            if (t == null) continue;
+            if (t.getProducerSource() == Enums.OwnerSource.DECLARED && t.getProducerApplicationId() != null) continue;
+            if (inf.applicationId().equals(t.getProducerApplicationId())) continue;
+            t.setProducerApplicationId(inf.applicationId());
+            t.setProducerSource(Enums.OwnerSource.INFERRED);
+            if (t.getOwnerTeamId() == null && inf.applicationTeamId() != null) {
+                t.setOwnerTeamId(inf.applicationTeamId());
+                t.setOwnerSource(Enums.OwnerSource.INFERRED);
+                t.setOwnerConfirmed(false);
+            }
+            tables.save(t);
+            n++;
         }
         return n;
     }

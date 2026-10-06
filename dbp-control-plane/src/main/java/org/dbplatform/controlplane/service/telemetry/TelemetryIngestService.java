@@ -1,7 +1,6 @@
 package org.dbplatform.controlplane.service.telemetry;
 
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -14,7 +13,6 @@ import org.dbplatform.common.telemetry.ConnectionEventType;
 import org.dbplatform.common.telemetry.PoolStats;
 import org.dbplatform.common.telemetry.QueryEvent;
 import org.dbplatform.common.telemetry.RoutineRef;
-import org.dbplatform.common.telemetry.SqlOperation;
 import org.dbplatform.common.telemetry.TableAccess;
 import org.dbplatform.common.telemetry.TelemetryJson;
 import org.dbplatform.controlplane.domain.Application;
@@ -30,7 +28,6 @@ import org.dbplatform.controlplane.domain.Ids;
 import org.dbplatform.controlplane.domain.Json;
 import org.dbplatform.controlplane.domain.PoolStatsSnapshot;
 import org.dbplatform.controlplane.domain.QueryEventRaw;
-import org.dbplatform.controlplane.domain.QueryStat;
 import org.dbplatform.controlplane.domain.Routine;
 import org.dbplatform.controlplane.repo.ApplicationRepository;
 import org.dbplatform.controlplane.repo.ConnectionEventRawRepository;
@@ -40,22 +37,28 @@ import org.dbplatform.controlplane.repo.PoolStatsSnapshotRepository;
 import org.dbplatform.controlplane.repo.QueryEventRawRepository;
 import org.dbplatform.controlplane.repo.QueryStatRepository;
 import org.dbplatform.controlplane.service.CatalogueService;
+import org.dbplatform.controlplane.service.Chunks;
 import org.dbplatform.controlplane.service.DatasourceService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Telemetry sink (docs/control-plane-api.md §9, docs/telemetry-events.md "Derivation rules").
  * Idempotent on {@code eventId}: resolves ids, creates discovered tables, upserts relationships,
  * aggregates hourly query statistics and stores raw events for the retention window.
+ * <p>Transactions are short: a posted batch (the gateway sends up to 500 events) is committed in chunks of {@link #CHUNK_SIZE} events, so
+ * the row locks of the rows it touches (relationships, query statistics, catalogue tables) are held for one chunk instead of the whole batch.
+ * Events are idempotent on {@code eventId}, so a batch that fails half way is simply re-sent by the sender.
  */
 @Service
-@Transactional
 public class TelemetryIngestService {
     private static final Logger log = LoggerFactory.getLogger(TelemetryIngestService.class);
-    private static final int RESERVOIR = 100;
+    /** Events per transaction. */
+    public static final int CHUNK_SIZE = 200;
 
     private final QueryEventRawRepository rawQueries;
     private final ConnectionEventRawRepository rawConnections;
@@ -67,34 +70,49 @@ public class TelemetryIngestService {
     private final DatasourceService datasourceService;
     private final CatalogueService catalogue;
     private final LiveConnectionRegistry live;
+    private final TransactionTemplate tx;
 
     public TelemetryIngestService(QueryEventRawRepository rawQueries, ConnectionEventRawRepository rawConnections,
                                   PoolStatsSnapshotRepository pools, QueryStatRepository stats, ApplicationRepository applications,
                                   DatasourceRepository datasources, DatabaseRepository databases, DatasourceService datasourceService,
-                                  CatalogueService catalogue, LiveConnectionRegistry live) {
+                                  CatalogueService catalogue, LiveConnectionRegistry live, PlatformTransactionManager txManager) {
         this.rawQueries = rawQueries; this.rawConnections = rawConnections; this.pools = pools; this.stats = stats;
         this.applications = applications; this.datasources = datasources; this.databases = databases;
         this.datasourceService = datasourceService; this.catalogue = catalogue; this.live = live;
+        this.tx = new TransactionTemplate(txManager);
     }
+
 
     // ---- queries ---------------------------------------------------------------------------------
 
     public int ingestQueries(List<QueryEvent> events) {
         int accepted = 0;
-        Map<String, Application> appCache = new HashMap<>();
-        Map<String, DatabaseInstance> dbCache = new HashMap<>();
-        for (QueryEvent e : events) {
-            if (e == null) continue;
-            try {
-                if (ingestQuery(e, appCache, dbCache)) accepted++;
-            } catch (RuntimeException ex) {
-                log.warn("Failed to ingest query event {}: {}", e.eventId(), ex.toString());
-            }
+        for (List<QueryEvent> chunk : Chunks.of(events, CHUNK_SIZE)) {
+            Integer n = tx.execute(status -> ingestQueryChunk(chunk));
+            accepted += n == null ? 0 : n;
         }
         return accepted;
     }
 
-    private boolean ingestQuery(QueryEvent e, Map<String, Application> appCache, Map<String, DatabaseInstance> dbCache) {
+    /** One transaction: the lookup caches live (and die) with it, so no managed entity is reused after its transaction ended. */
+    private int ingestQueryChunk(List<QueryEvent> events) {
+        int accepted = 0;
+        Map<String, Application> appCache = new HashMap<>();
+        Map<String, DatabaseInstance> dbCache = new HashMap<>();
+        ChunkWrites writes = new ChunkWrites(stats);
+        for (QueryEvent e : events) {
+            if (e == null) continue;
+            try {
+                if (ingestQuery(e, appCache, dbCache, writes)) accepted++;
+            } catch (RuntimeException ex) {
+                log.warn("Failed to ingest query event {}: {}", e.eventId(), ex.toString());
+            }
+        }
+        writes.apply(catalogue); // the shared rows (tables, routines, relationships, statistics) are written once, just before the commit
+        return accepted;
+    }
+
+    private boolean ingestQuery(QueryEvent e, Map<String, Application> appCache, Map<String, DatabaseInstance> dbCache, ChunkWrites writes) {
         String eventId = e.eventId() != null && !e.eventId().isBlank() ? e.eventId() : Ids.newId();
         if (rawQueries.existsById(eventId)) return false;
         Instant ts = e.timestamp() != null ? e.timestamp() : Instant.now();
@@ -109,69 +127,31 @@ public class TelemetryIngestService {
         if (db != null) {
             for (TableAccess ta : e.tables()) {
                 DbTable t = catalogue.resolveOrDiscoverTable(db, ta.schema(), ta.name(), e.defaultSchema());
-                touch(t, ts);
+                writes.tableSeen(t, ts);
                 RelationshipKind kind = ta.access() == AccessType.WRITE ? RelationshipKind.WRITES : RelationshipKind.READS;
                 tableRefs.add(Map.of("tableId", t.getId(), "access", kind == RelationshipKind.WRITES ? "WRITE" : "READ"));
-                if (app != null) catalogue.recordRelationship(app.getId(), ObjectType.TABLE, t.getId(), kind, RelationshipSource.GATEWAY, null, 1, ts);
+                if (app != null) writes.relationship(app.getId(), ObjectType.TABLE, t.getId(), kind, RelationshipSource.GATEWAY, null, ts);
             }
             for (RoutineRef rr : e.routines()) {
                 Routine r = catalogue.resolveOrDiscoverRoutine(db, rr.schema(), rr.name(), e.defaultSchema());
-                r.setLastSeenAt(ts);
+                writes.routineSeen(r, ts);
                 if (app != null) {
-                    catalogue.recordRelationship(app.getId(), ObjectType.ROUTINE, r.getId(), RelationshipKind.CALLS, RelationshipSource.GATEWAY, null, 1, ts);
+                    writes.relationship(app.getId(), ObjectType.ROUTINE, r.getId(), RelationshipKind.CALLS, RelationshipSource.GATEWAY, null, ts);
                     // CALL expansion: A READS/WRITES T for every T in R's transitive dictionary dependencies, viaRoutineId = R
                     for (Map.Entry<String, RelationshipKind> ex : catalogue.expandRoutineToTables(r.getId()).entrySet()) {
-                        catalogue.recordRelationship(app.getId(), ObjectType.TABLE, ex.getKey(), ex.getValue(), RelationshipSource.GATEWAY, r.getId(), 1, ts);
+                        writes.relationship(app.getId(), ObjectType.TABLE, ex.getKey(), ex.getValue(), RelationshipSource.GATEWAY, r.getId(), ts);
                         tableRefs.add(Map.of("tableId", ex.getKey(), "access", ex.getValue() == RelationshipKind.WRITES ? "WRITE" : "READ", "via", r.getId()));
                     }
                 }
             }
         }
-        aggregate(e, ts, app, db, tableRefs);
+        aggregate(e, ts, app, db, tableRefs, writes);
         return true;
     }
 
-    private void touch(DbTable t, Instant ts) {
-        if (t.getFirstSeenAt() == null) t.setFirstSeenAt(ts);
-        if (t.getLastSeenAt() == null || ts.isAfter(t.getLastSeenAt())) t.setLastSeenAt(ts);
-    }
-
-    private void aggregate(QueryEvent e, Instant ts, Application app, DatabaseInstance db, List<Map<String, String>> tableRefs) {
+    private void aggregate(QueryEvent e, Instant ts, Application app, DatabaseInstance db, List<Map<String, String>> tableRefs, ChunkWrites writes) {
         String hash = e.sqlHash() != null && !e.sqlHash().isBlank() ? e.sqlHash() : org.dbplatform.controlplane.service.SecretCipher.sha256Hex(e.sqlNormalized() == null ? "" : e.sqlNormalized());
-        Instant bucket = ts.truncatedTo(ChronoUnit.HOURS);
-        String appId = app == null ? null : app.getId();
-        String dbId = db == null ? null : db.getId();
-        QueryStat s = stats.findBucket(hash, appId, dbId, bucket).orElseGet(() -> {
-            QueryStat n = new QueryStat();
-            n.setId(Ids.newId());
-            n.setSqlHash(hash);
-            n.setSqlNormalized(e.sqlNormalized());
-            n.setOperation(e.operation() == null ? SqlOperation.OTHER.name() : e.operation().name());
-            n.setApplicationId(appId);
-            n.setDatabaseId(dbId);
-            n.setDatasourceName(e.datasource());
-            n.setBucketStart(bucket);
-            return n;
-        });
-        s.setExecCount(s.getExecCount() + 1);
-        long dur = Math.max(0, e.durationMs());
-        s.setTotalDurationMs(s.getTotalDurationMs() + dur);
-        s.setMaxDurationMs(Math.max(s.getMaxDurationMs(), dur));
-        if (e.rows() > 0) s.setRowCount(s.getRowCount() + e.rows());
-        if (!e.success()) s.setErrorCount(s.getErrorCount() + 1);
-        if (s.getLastSeenAt() == null || ts.isAfter(s.getLastSeenAt())) s.setLastSeenAt(ts);
-        List<Long> samples = Optional.ofNullable(Json.read(s.getDurationSamples(), new com.fasterxml.jackson.core.type.TypeReference<List<Long>>() {})).orElseGet(ArrayList::new);
-        if (samples.size() < RESERVOIR) samples.add(dur);
-        else samples.set((int) (s.getExecCount() % RESERVOIR), dur);
-        s.setDurationSamples(Json.write(samples));
-        if (!tableRefs.isEmpty()) {
-            List<Map<String, String>> merged = Optional.ofNullable(Json.read(s.getTablesJson(), new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, String>>>() {})).orElseGet(ArrayList::new);
-            for (Map<String, String> ref : tableRefs) {
-                if (merged.stream().noneMatch(m -> m.get("tableId").equals(ref.get("tableId")) && m.get("access").equals(ref.get("access")))) merged.add(ref);
-            }
-            s.setTablesJson(Json.write(merged));
-        }
-        stats.save(s);
+        writes.query(e, ts, hash, app == null ? null : app.getId(), db == null ? null : db.getId(), tableRefs);
     }
 
     private QueryEventRaw toRaw(QueryEvent e, String eventId, Instant ts, Application app, DatabaseInstance db) {
@@ -236,6 +216,15 @@ public class TelemetryIngestService {
 
     public int ingestConnections(List<ConnectionEvent> events) {
         int accepted = 0;
+        for (List<ConnectionEvent> chunk : Chunks.of(events, CHUNK_SIZE)) {
+            Integer n = tx.execute(status -> ingestConnectionChunk(chunk));
+            accepted += n == null ? 0 : n;
+        }
+        return accepted;
+    }
+
+    private int ingestConnectionChunk(List<ConnectionEvent> events) {
+        int accepted = 0;
         for (ConnectionEvent e : events) {
             if (e == null) continue;
             try {
@@ -294,6 +283,15 @@ public class TelemetryIngestService {
     // ---- pools -----------------------------------------------------------------------------------
 
     public int ingestPools(List<PoolStats> list) {
+        int accepted = 0;
+        for (List<PoolStats> chunk : Chunks.of(list, CHUNK_SIZE)) {
+            Integer n = tx.execute(status -> ingestPoolChunk(chunk));
+            accepted += n == null ? 0 : n;
+        }
+        return accepted;
+    }
+
+    private int ingestPoolChunk(List<PoolStats> list) {
         int accepted = 0;
         for (PoolStats p : list) {
             if (p == null) continue;

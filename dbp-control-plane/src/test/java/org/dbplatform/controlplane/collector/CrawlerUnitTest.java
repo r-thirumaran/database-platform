@@ -177,6 +177,8 @@ class CrawlerUnitTest {
         String columnSql = stub.executed.stream().filter(sql -> sql.contains("FROM pg_attribute a")).findFirst().orElseThrow();
         assertThat(columnSql).contains("a.attnum > 0").contains("NOT a.attisdropped").contains("format_type(a.atttypid, a.atttypmod)")
                 .contains("a.attnotnull").contains("LEFT JOIN pg_attrdef").contains("pg_get_expr(d.adbin, d.adrelid)");
+        // only ordinary columns report a default: a STORED generated column's pg_attrdef row is its generation expression (PostgreSQL 12+: attgenerated)
+        assertThat(columnSql).contains("CASE WHEN a.attgenerated = '' THEN pg_get_expr(d.adbin, d.adrelid) END AS column_default");
         // relkind r / p -> TABLE, v -> VIEW, m -> MATERIALIZED_VIEW
         assertThat(r.table("sales", "orders").kind).isEqualTo(Enums.TableKind.TABLE);
         assertThat(r.table("sales", "events").kind).isEqualTo(Enums.TableKind.TABLE);
@@ -196,6 +198,7 @@ class CrawlerUnitTest {
         assertThat(total.dataType()).isEqualTo("numeric(12,2)");
         assertThat(total.precision()).isEqualTo(12);
         assertThat(total.scale()).isEqualTo(2);
+        assertThat(total.defaultValue()).isNull(); // e.g. a STORED generated column: the CASE yields NULL, the generation expression is no default
         assertThat(r.table("sales", "v_orders").columns).hasSize(1);
         assertThat(r.table("sales", "mv_daily").columns).hasSize(1);
         Model.RoutineInfo trg = r.routine("sales", "trg_orders_audit");

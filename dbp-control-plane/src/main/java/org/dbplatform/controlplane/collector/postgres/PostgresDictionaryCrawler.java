@@ -59,7 +59,9 @@ public class PostgresDictionaryCrawler implements DictionaryCrawler {
                 + " CASE WHEN a.atttypid IN (1042, 1043) AND a.atttypmod > 4 THEN a.atttypmod - 4 END AS char_length,"
                 + " CASE WHEN a.atttypid = 1700 AND a.atttypmod >= 4 THEN ((a.atttypmod - 4) >> 16) & 65535 END AS num_precision,"
                 + " CASE WHEN a.atttypid = 1700 AND a.atttypmod >= 4 THEN (a.atttypmod - 4) & 65535 END AS num_scale,"
-                + " NOT a.attnotnull AS nullable, pg_get_expr(d.adbin, d.adrelid) AS column_default"
+                + " NOT a.attnotnull AS nullable,"
+                // a STORED generated column keeps its generation expression in pg_attrdef: that is not a default value (attgenerated: PostgreSQL 12+)
+                + " CASE WHEN a.attgenerated = '' THEN pg_get_expr(d.adbin, d.adrelid) END AS column_default"
                 + " FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace"
                 + " LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum"
                 + " WHERE c.relkind IN ('r', 'p', 'v', 'm') AND a.attnum > 0 AND NOT a.attisdropped AND n.nspname IN " + in

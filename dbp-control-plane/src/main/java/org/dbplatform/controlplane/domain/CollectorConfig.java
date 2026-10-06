@@ -2,6 +2,7 @@ package org.dbplatform.controlplane.domain;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /** Per-database collector settings (docs/control-plane-api.md §3). */
 public class CollectorConfig {
@@ -25,4 +26,19 @@ public class CollectorConfig {
     public void setAuditTrail(boolean auditTrail) { this.auditTrail = auditTrail; }
     public String getCredentialId() { return credentialId; }
     public void setCredentialId(String credentialId) { this.credentialId = credentialId; }
+
+    // Value semantics: Hibernate compares the loaded snapshot of a converted attribute with its current value using equals(); without it
+    // every flush saw a "changed" attribute and re-wrote the owning row (see SpuriousUpdateTest).
+    @Override public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof CollectorConfig other)) return false;
+        return enabled == other.enabled
+                && dictionaryIntervalSeconds == other.dictionaryIntervalSeconds
+                && runtimeIntervalSeconds == other.runtimeIntervalSeconds
+                && Objects.equals(schemas, other.schemas)
+                && auditTrail == other.auditTrail
+                && Objects.equals(credentialId, other.credentialId);
+    }
+
+    @Override public int hashCode() { return Objects.hash(enabled, dictionaryIntervalSeconds, runtimeIntervalSeconds, schemas, auditTrail, credentialId); }
 }

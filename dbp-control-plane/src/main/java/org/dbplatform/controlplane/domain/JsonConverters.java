@@ -8,13 +8,18 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** JPA converters storing small JSON documents in TEXT columns (portable across H2 and PostgreSQL). */
+/**
+ * JPA converters storing small JSON documents in TEXT columns (portable across H2 and PostgreSQL).
+ * Writing is canonical ({@link Json#writeCanonical}: sorted keys). Hibernate decides "dirty" with {@code equals()} of the domain
+ * value, so every converted value type ({@link IdentityRules}, {@link CollectorConfig}, {@link PoolPolicy}, {@link TableMigration},
+ * {@code List}, {@code Map}) must have value-based equality.
+ */
 public final class JsonConverters {
     private JsonConverters() {}
 
     @Converter
     public static class StringList implements AttributeConverter<List<String>, String> {
-        @Override public String convertToDatabaseColumn(List<String> v) { return v == null ? null : Json.write(v); }
+        @Override public String convertToDatabaseColumn(List<String> v) { return v == null ? null : Json.writeCanonical(v); }
         @Override public List<String> convertToEntityAttribute(String s) {
             List<String> l = Json.read(s, new TypeReference<List<String>>() {});
             return l == null ? new ArrayList<>() : l;
@@ -23,7 +28,7 @@ public final class JsonConverters {
 
     @Converter
     public static class StringMap implements AttributeConverter<Map<String, String>, String> {
-        @Override public String convertToDatabaseColumn(Map<String, String> v) { return v == null ? null : Json.write(v); }
+        @Override public String convertToDatabaseColumn(Map<String, String> v) { return v == null ? null : Json.writeCanonical(v); }
         @Override public Map<String, String> convertToEntityAttribute(String s) {
             Map<String, String> m = Json.read(s, new TypeReference<LinkedHashMap<String, String>>() {});
             return m == null ? new LinkedHashMap<>() : m;
@@ -32,7 +37,7 @@ public final class JsonConverters {
 
     @Converter
     public static class IdentityRulesConv implements AttributeConverter<IdentityRules, String> {
-        @Override public String convertToDatabaseColumn(IdentityRules v) { return v == null ? null : Json.write(v); }
+        @Override public String convertToDatabaseColumn(IdentityRules v) { return v == null ? null : Json.writeCanonical(v); }
         @Override public IdentityRules convertToEntityAttribute(String s) {
             IdentityRules r = Json.read(s, IdentityRules.class);
             return r == null ? new IdentityRules() : r;
@@ -41,7 +46,7 @@ public final class JsonConverters {
 
     @Converter
     public static class CollectorConfigConv implements AttributeConverter<CollectorConfig, String> {
-        @Override public String convertToDatabaseColumn(CollectorConfig v) { return v == null ? null : Json.write(v); }
+        @Override public String convertToDatabaseColumn(CollectorConfig v) { return v == null ? null : Json.writeCanonical(v); }
         @Override public CollectorConfig convertToEntityAttribute(String s) {
             CollectorConfig c = Json.read(s, CollectorConfig.class);
             return c == null ? new CollectorConfig() : c;
@@ -50,7 +55,7 @@ public final class JsonConverters {
 
     @Converter
     public static class PoolPolicyConv implements AttributeConverter<PoolPolicy, String> {
-        @Override public String convertToDatabaseColumn(PoolPolicy v) { return v == null ? null : Json.write(v); }
+        @Override public String convertToDatabaseColumn(PoolPolicy v) { return v == null ? null : Json.writeCanonical(v); }
         @Override public PoolPolicy convertToEntityAttribute(String s) {
             PoolPolicy p = Json.read(s, PoolPolicy.class);
             return p == null ? new PoolPolicy() : p;
@@ -59,7 +64,7 @@ public final class JsonConverters {
 
     @Converter
     public static class TableMigrationConv implements AttributeConverter<TableMigration, String> {
-        @Override public String convertToDatabaseColumn(TableMigration v) { return v == null ? null : Json.write(v); }
+        @Override public String convertToDatabaseColumn(TableMigration v) { return v == null ? null : Json.writeCanonical(v); }
         @Override public TableMigration convertToEntityAttribute(String s) {
             TableMigration m = Json.read(s, TableMigration.class);
             return m == null ? new TableMigration() : m;

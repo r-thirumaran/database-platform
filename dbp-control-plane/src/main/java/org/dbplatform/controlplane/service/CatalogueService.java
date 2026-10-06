@@ -88,6 +88,7 @@ public class CatalogueService {
         return list.size();
     }
 
+    @Transactional(readOnly = true)
     public List<SchemaOwnership> schemaOwnerships() { return schemaOwnership.findAll(); }
 
     // ---- tables ----------------------------------------------------------------------------------
@@ -448,17 +449,27 @@ public class CatalogueService {
     /** Upsert used by telemetry/collectors: increments queryCount and refreshes lastSeenAt. */
     public Relationship recordRelationship(String applicationId, ObjectType objectType, String objectId, Enums.RelationshipKind kind,
                                            Enums.RelationshipSource source, String viaRoutineId, long increment, Instant seenAt) {
+        return recordRelationship(applicationId, objectType, objectId, kind, source, viaRoutineId, increment, seenAt, seenAt);
+    }
+
+    /**
+     * Same upsert for {@code increment} observations at once: {@code firstSeenAt} is the time of the first of them (used when the row is
+     * created), {@code lastSeenAt} of the latest. Telemetry ingestion folds the events of a chunk into one call per relationship so a hot row
+     * is written (and locked) once per transaction instead of once per event.
+     */
+    public Relationship recordRelationship(String applicationId, ObjectType objectType, String objectId, Enums.RelationshipKind kind,
+                                           Enums.RelationshipSource source, String viaRoutineId, long increment, Instant firstSeenAt, Instant lastSeenAt) {
         Relationship r = relationships.findExisting(applicationId, objectType, objectId, kind, source, viaRoutineId).orElseGet(() -> {
             Relationship n = new Relationship();
             n.setId(Ids.newId());
             n.setApplicationId(applicationId); n.setObjectType(objectType); n.setObjectId(objectId);
             n.setKind(kind); n.setSource(source); n.setViaRoutineId(viaRoutineId);
-            n.setFirstSeenAt(seenAt);
+            n.setFirstSeenAt(firstSeenAt);
             n.setConfidence(Enums.confidenceOf(source));
             return n;
         });
         r.setQueryCount(r.getQueryCount() + increment);
-        if (r.getLastSeenAt() == null || seenAt.isAfter(r.getLastSeenAt())) r.setLastSeenAt(seenAt);
+        if (r.getLastSeenAt() == null || lastSeenAt.isAfter(r.getLastSeenAt())) r.setLastSeenAt(lastSeenAt);
         return relationships.save(r);
     }
 
@@ -471,6 +482,8 @@ public class CatalogueService {
 
     private static String blankToNull(String s) { return s == null || s.isBlank() ? null : s; }
 
+    @Transactional(readOnly = true)
     public List<DbTable> tablesByIds(Set<String> ids) { return ids.isEmpty() ? List.of() : tables.findByIdIn(ids); }
+    @Transactional(readOnly = true)
     public List<Routine> routinesByIds(Set<String> ids) { return ids.isEmpty() ? new ArrayList<>() : routines.findByIdIn(ids); }
 }

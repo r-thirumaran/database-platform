@@ -21,7 +21,10 @@ import org.dbplatform.controlplane.repo.ComponentRepository;
 import org.dbplatform.controlplane.repo.TeamRepository;
 import org.dbplatform.controlplane.service.ConfigVersionService;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /** Heartbeats from gateways and proxies; keeps the proxy live-connection snapshot. */
 @Service
@@ -33,49 +36,64 @@ public class ComponentService {
     private final LiveConnectionRegistry live;
     private final ConfigVersionService configVersion;
     private final DbpProperties props;
+    private final TransactionTemplate readTx;
+    private final TransactionTemplate writeTx;
 
     public ComponentService(ComponentRepository components, ApplicationRepository applications, TeamRepository teams,
-                            LiveConnectionRegistry live, ConfigVersionService configVersion, DbpProperties props) {
+                            LiveConnectionRegistry live, ConfigVersionService configVersion, DbpProperties props, PlatformTransactionManager txManager) {
         this.components = components; this.applications = applications; this.teams = teams;
         this.live = live; this.configVersion = configVersion; this.props = props;
+        this.writeTx = new TransactionTemplate(txManager);
+        this.readTx = new TransactionTemplate(txManager);
+        this.readTx.setReadOnly(true);
     }
 
-    /** Stores the heartbeat (raw stats kept as JSON, live connections turned into the proxy snapshot). */
+    /**
+     * Stores the heartbeat (raw stats kept as JSON, live connections turned into the proxy snapshot). Heartbeats arrive every few seconds from
+     * every gateway and proxy, so the write transaction only covers the component row; the application / team lookups for the live rows run in
+     * a read-only transaction of their own.
+     */
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public long heartbeat(Map<String, Object> body) {
         Heartbeat hb = TelemetryJson.mapper().convertValue(body, Heartbeat.class);
         if (hb.componentType() == null || hb.componentId() == null || hb.componentId().isBlank()) {
             throw new org.dbplatform.controlplane.api.error.ApiException.BadRequest("componentType and componentId are required");
         }
         Enums.ComponentType type = Enums.ComponentType.valueOf(hb.componentType().name());
-        Component c = components.findByComponentTypeAndComponentId(type, hb.componentId()).orElseGet(() -> {
-            Component n = new Component();
-            n.setId(Ids.newId());
-            n.setComponentType(type);
-            n.setComponentId(hb.componentId());
-            return n;
-        });
-        c.setVersion(hb.version());
-        c.setHost(hb.host());
-        c.setStartedAt(hb.startedAt());
-        c.setLastHeartbeat(Instant.now());
-        c.setConfigVersion(hb.configVersion());
         Map<String, Object> stats = new LinkedHashMap<>();
         Object rawStats = body.get("stats");
         if (rawStats instanceof Map<?, ?> m) m.forEach((k, v) -> { if (!"liveConnections".equals(k)) stats.put(String.valueOf(k), v); });
         stats.put("liveConnections", hb.stats().liveConnections().size());
-        c.setStatsJson(Json.write(stats));
         List<ConnectionEvent> liveConns = hb.stats().liveConnections();
-        c.setLiveConnectionsJson(TelemetryJson.toJson(liveConns));
-        components.save(c);
+        String statsJson = Json.write(stats);
+        String liveConnectionsJson = TelemetryJson.toJson(liveConns);
+        writeTx.executeWithoutResult(status -> {
+            Component c = components.findByComponentTypeAndComponentId(type, hb.componentId()).orElseGet(() -> {
+                Component n = new Component();
+                n.setId(Ids.newId());
+                n.setComponentType(type);
+                n.setComponentId(hb.componentId());
+                return n;
+            });
+            c.setVersion(hb.version());
+            c.setHost(hb.host());
+            c.setStartedAt(hb.startedAt());
+            c.setLastHeartbeat(Instant.now());
+            c.setConfigVersion(hb.configVersion());
+            c.setStatsJson(statsJson);
+            c.setLiveConnectionsJson(liveConnectionsJson);
+            components.save(c);
+        });
 
         if (type == Enums.ComponentType.PROXY) {
             List<LiveConnectionRegistry.ProxyConnection> pcs = new ArrayList<>();
-            List<LiveConnection> rows = new ArrayList<>();
-            Map<String, Application> appCache = new LinkedHashMap<>();
-            for (ConnectionEvent e : liveConns) {
-                pcs.add(toProxyConnection(hb.componentId(), e));
-                rows.add(toLiveRow(e, appCache));
-            }
+            for (ConnectionEvent e : liveConns) pcs.add(toProxyConnection(hb.componentId(), e));
+            List<LiveConnection> rows = readTx.execute(status -> {
+                List<LiveConnection> out = new ArrayList<>();
+                Map<String, Application> appCache = new LinkedHashMap<>();
+                for (ConnectionEvent e : liveConns) out.add(toLiveRow(e, appCache));
+                return out;
+            });
             live.replaceProxyConnections(hb.componentId(), pcs);
             live.setProxySnapshot(hb.componentId(), rows);
         }

@@ -40,9 +40,15 @@ public class CollectorConnections {
      * collector's own session. Everything else is gateway oriented session behaviour ({@code currentSchema},
      * {@code escapeSyntaxCallMode}, {@code stringtype}, {@code readOnlyMode}, {@code ApplicationName}, ...): a collector
      * connection that inherited {@code currentSchema=sales} could no longer see {@code public.pg_stat_statements}.
+     * ({@code oracle.net.wallet_location} is covered by {@code oracle.net.}.)
      */
     static final List<String> CONNECTION_LEVEL_PREFIXES = List.of("ssl", "connectTimeout", "loginTimeout", "socketTimeout",
-            "oracle.net.", "oracle.jdbc.ReadTimeout", "encrypt", "trustServerCertificate");
+            "oracle.net.", "oracle.jdbc.ReadTimeout", "encrypt", "trustServerCertificate",
+            // TLS trust and client-certificate settings of the Oracle thin and SQL Server drivers: without them a database that only accepts
+            // a corporate CA / mutual TLS cannot be crawled although the gateway connects fine
+            "hostNameInCertificate", "trustStore" /* trustStore, trustStorePassword, trustStoreType */, "serverCertificate",
+            "trustManager" /* trustManagerClass, trustManagerConstructorArg */, "fips", "clientCertificate", "clientKey" /* clientKey, clientKeyPassword */,
+            "javax.net.ssl." /* Oracle thin keystore / truststore properties */);
 
     /** Name the collector's sessions carry on the database (pg_stat_activity.application_name, V$SESSION.PROGRAM, ...). */
     static final String APPLICATION_NAME = "dbp-collector";

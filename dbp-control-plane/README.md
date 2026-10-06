@@ -49,7 +49,7 @@ Every option is bound through `application.yml` (`dbp.*`, `@ConfigurationPropert
 | Variable | Default | Meaning |
 |---|---|---|
 | `DBP_PORT` | `8080` | HTTP port (API + UI) |
-| `DBP_DB_URL` | dev: `jdbc:h2:file:./data/dbp;MODE=PostgreSQL;…`; postgres: `jdbc:postgresql://localhost:5432/dbp` | Metadata store JDBC URL |
+| `DBP_DB_URL` | dev: `jdbc:h2:file:./data/dbp;MODE=PostgreSQL;…;LOCK_TIMEOUT=10000`; postgres: `jdbc:postgresql://localhost:5432/dbp` | Metadata store JDBC URL (a URL you set yourself replaces the whole default, including `LOCK_TIMEOUT`, see below) |
 | `DBP_DB_USER` / `DBP_DB_PASSWORD` | dev: `sa` / empty; postgres: `dbp` / `dbp` | Metadata store credentials |
 | `DBP_DB_POOL_SIZE` | `10` | Hikari pool size (postgres profile) |
 | `DBP_SERVICE_TOKEN` | `dev-service-token` | Shared secret gateways/proxies send as `X-DBP-Service-Token` on `/api/v1/internal/**` |
@@ -70,6 +70,24 @@ Every option is bound through `application.yml` (`dbp.*`, `@ConfigurationPropert
 | `DBP_COLLECTOR_MAX_SQL_PER_SAMPLE` | `200` | Max new statements fetched from V$SQL / pg_stat_statements per runtime sample |
 | `DBP_COMPONENT_HEALTHY_SECONDS` | `30` | A gateway/proxy is `healthy` while its last heartbeat is younger than this |
 | `DBP_CORS_ALLOWED_ORIGINS` | `http://localhost:5173` | CORS origins for `/api/**` (Vite dev server) |
+
+### Metadata store: transactions and the H2 lock timeout
+
+The `dev` profile's default H2 URL ends in `;LOCK_TIMEOUT=10000`: a statement that has to wait for a row or table lock held by another
+transaction fails with `Timeout trying to lock table "..."` after **10 s** instead of H2's built-in **2 s**. It is a safety margin, not the
+fix: the control plane keeps its write transactions short so locks are rarely contended at all.
+
+* Telemetry ingestion commits per chunk of 200 events (`TelemetryIngestService.CHUNK_SIZE`), not per posted batch of up to 500.
+* Collectors persist in chunks too (200 objects / sessions / audit rows per transaction); the applications and teams they attribute
+  sessions to are read in read-only transactions and are never part of a write transaction.
+* `POST /governance/evaluate` computes in a read-only transaction and applies the result in one short write transaction.
+* JSON-valued columns (`identityRules`, `collector`, `poolPolicy`, `migration`, `tags`, ...) go through JPA converters; their value types
+  (`IdentityRules`, `CollectorConfig`, `PoolPolicy`, `TableMigration`) implement `equals`/`hashCode`, otherwise Hibernate considers the
+  attribute changed on every flush and re-writes (and row-locks) every loaded row. `SpuriousUpdateTest` guards this.
+
+Set `DBP_DB_URL` yourself (e.g. the integration tests do, `dbp-integration-tests/.../Stack`) and you replace the default URL as a whole: add
+`;LOCK_TIMEOUT=10000` (or another value in milliseconds) to keep the longer timeout. PostgreSQL has no such URL setting
+(its `lock_timeout` is a server/session parameter), so the `postgres` profile is unchanged.
 
 Credential providers: `INLINE` (encrypted with the master key), `ENV` (variable read on the control
 plane host), `FILE` (file read on the control plane host). `VAULT`, `GCP_SECRET_MANAGER` and
@@ -117,7 +135,7 @@ Per database (`collector.enabled`): a **dictionary crawl** every `dictionaryInte
   (no ASH/AWR/`DBA_HIST_*`).
 * **PostgreSQL** — dictionary entirely on `pg_catalog`: `pg_class` + `pg_namespace` (`relkind r/p` = TABLE,
   `v` = VIEW, `m` = MATERIALIZED_VIEW), `pg_attribute` + `pg_attrdef` (columns: `format_type`, `attnotnull`,
-  `pg_get_expr` defaults), `pg_description`, `pg_constraint`, `pg_proc` (+ `prosrc` parsing), `pg_trigger`,
+  `pg_get_expr` defaults of ordinary columns, not the expression of generated columns: `pg_attribute.attgenerated`, PostgreSQL 12+), `pg_description`, `pg_constraint`, `pg_proc` (+ `prosrc` parsing), `pg_trigger`,
   `pg_views` / `pg_matviews`, `pg_stat_user_tables`. `information_schema` is deliberately not used: it only lists
   objects the connected role holds privileges on, so a least-privilege `pg_monitor` role (no table grants) sees every
   table, view and materialized view this way. Runtime: `pg_stat_activity`, and `pg_stat_statements` when installed —
@@ -147,4 +165,6 @@ resource, api keys and authentication, datasource resolution precedence, telemet
 heartbeats/live connections/pools, the demo graph and impact analysis, governance, import/export
 (including `deploy/bootstrap/platform-config.json`), service-token enforcement; crawler mapping tests
 against canned result sets (stub JDBC connection); and `PostgresMigrationTest` which boots the context
-on the `postgres` profile against an embedded PostgreSQL.
+on the `postgres` profile against an embedded PostgreSQL. `SpuriousUpdateTest` and `ConcurrentIngestionTest` register a Hibernate
+`StatementInspector` (`SqlRecorder`, wired in `application-test.yml`) and assert that loading entities, governance evaluation, collector merges
+and concurrent telemetry ingestion never issue an `update application` (or any other update of a row nobody changed).
