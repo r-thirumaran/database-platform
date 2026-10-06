@@ -215,7 +215,7 @@ Full report with environment, per-test evidence and defect list: [docs/validatio
 | Control plane                           | Spring Boot test suite (REST contract, telemetry ingestion, CALL expansion, graph, impact, governance, import/export, Flyway on embedded PostgreSQL) | pass |
 | UI                                      | lint, type check, unit tests, Playwright walkthrough of every page and mutation against the **real** control plane (18/18) and the mock (18/18) | pass |
 | End to end (real jars, PostgreSQL 16)   | 41 scenario tests: bootstrap import, gateway in control-plane mode, driver over the full stack, HikariCP with physical connections capped at 4, batch load, telemetry round trip with CALL expansion, credential rotation, routing rule and switch, access control, proxy path | 41/41 pass (9 recorded deviations, see below) |
-| CI (GitHub Actions)                     | `mvn verify` for all modules, UI build, Docker image builds for control plane, gateway, proxy           | see badge |
+| CI (GitHub Actions)                     | `mvn verify` for all modules, UI build, Docker image builds for control plane, gateway, proxy. The last run that GitHub executed for this branch (19:14 UTC, run 19) passed every module except a control-plane test fixed since; later runs on the feature branch were not scheduled (no runner assigned within seconds), which usually means the account's Actions minutes or spending limit — check *Settings → Billing → Actions*, then trigger the workflow manually (`workflow_dispatch`) or open a pull request. | see badge |
 
 ### Deviations and untested paths — read before relying on this
 
