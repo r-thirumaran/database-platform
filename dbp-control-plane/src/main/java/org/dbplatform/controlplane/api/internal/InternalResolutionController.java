@@ -56,6 +56,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/v1/internal")
 public class InternalResolutionController {
+    /** Listener port per proxyable engine. H2 and OTHER databases have no proxy listener (the proxy speaks the Oracle, PostgreSQL and SQL Server wire protocols). */
     private static final Map<Enums.Engine, Integer> LISTENER_PORTS = Map.of(Enums.Engine.ORACLE, 1521, Enums.Engine.POSTGRES, 5432, Enums.Engine.MSSQL, 1433);
 
     private final ApplicationService applicationService;
@@ -140,12 +141,13 @@ public class InternalResolutionController {
         Map<Enums.Engine, List<ProxyConfig.Route>> routesPerEngine = new LinkedHashMap<>();
         for (Datasource ds : dss) {
             DatabaseInstance db = ds.getCurrentDatabaseId() == null ? null : dbs.get(ds.getCurrentDatabaseId());
-            if (db == null || ds.getState() == Enums.DatasourceState.RETIRED) continue;
+            if (db == null || ds.getState() == Enums.DatasourceState.RETIRED || !LISTENER_PORTS.containsKey(db.getEngine())) continue;
             routesPerEngine.computeIfAbsent(db.getEngine(), k -> new ArrayList<>())
                     .add(new ProxyConfig.Route(ds.getName(), ds.getId(), db.getId(), db.getHost(), db.getPort(), db.getServiceName(), true));
         }
         List<ProxyConfig.Listener> listeners = new ArrayList<>();
         for (Enums.Engine engine : Enums.Engine.values()) {
+            if (!LISTENER_PORTS.containsKey(engine)) continue; // H2 / OTHER: nothing to listen for
             List<DatabaseInstance> ofEngine = dbs.values().stream().filter(d -> d.getEngine() == engine).sorted(Comparator.comparing(DatabaseInstance::getName)).toList();
             if (ofEngine.isEmpty()) continue;
             DatabaseInstance dflt = ofEngine.get(0);

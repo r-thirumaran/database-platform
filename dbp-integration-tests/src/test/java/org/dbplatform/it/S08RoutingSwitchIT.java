@@ -2,7 +2,6 @@ package org.dbplatform.it;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.dbplatform.it.support.Await;
-import org.dbplatform.it.support.ControlPlaneApi;
 import org.dbplatform.it.support.ItExtension;
 import org.dbplatform.it.support.Results;
 import org.dbplatform.it.support.Sql;
@@ -72,7 +71,7 @@ class S08RoutingSwitchIT {
         }
         try (Connection c = s.connect(DS_SALES, ORDERS)) {
             assertThat(Sql.queryString(c, "SELECT current_database()")).isEqualTo("sales");
-            assertThat(Sql.queryLong(c, "SELECT count(*) FROM customer")).isGreaterThan(200);
+            assertThat(Sql.queryLong(c, "SELECT count(*) FROM customer")).as("demo data (200 customers; earlier scenarios add more)").isGreaterThanOrEqualTo(200);
         }
         JsonNode pools = s.gatewayAdmin("/pools");
         assertThat(stream(pools).map(p -> p.path("jdbcUrl").asText()).toList()).anyMatch(u -> u.endsWith("/sales_alt")).anyMatch(u -> u.endsWith("/sales"));
@@ -127,9 +126,29 @@ class S08RoutingSwitchIT {
         try (Connection pg = s.connect(DS_SALES, ORDERS)) {
             assertThat(pg.getMetaData().getDatabaseProductName()).isEqualTo("PostgreSQL");
         }
-        ControlPlaneApi.Response h2Db = s.cp().post("/databases", Map.of("name", "sales-h2", "engine", "H2", "host", "127.0.0.1", "port", h2.h2TcpPort(), "serviceName", "mem:salesh2"));
-        assertThat(h2Db.status()).as("control plane rejects engine H2").isGreaterThanOrEqualTo(400);
-        Results.partial("the control plane cannot model an H2 database (Enums.Engine = ORACLE|POSTGRES|MSSQL; POST /databases engine H2 -> HTTP " + h2Db.status()
-                + "), so the second engine was validated behind a static-mode gateway and the control-plane routing switch used a second PostgreSQL database (sales_alt)");
+        // the control plane models H2 as well (Engine H2 / OTHER): the H2 server becomes a database, a datasource routes to it and it resolves
+        // to jdbc:h2:tcp://host:port/serviceName; the proxy configuration (PostgreSQL / Oracle / SQL Server only) leaves it out
+        String dbName = "sales-h2-cp";
+        String dsName = "sales-h2-cp";
+        JsonNode h2Db = s.cp().post("/databases", Map.of("name", dbName, "engine", "H2", "host", "127.0.0.1", "port", h2.h2TcpPort(), "serviceName", "mem:salesh2",
+                "collector", Map.of("enabled", false))).expect(201).json();
+        assertThat(h2Db.path("engine").asText()).isEqualTo("H2");
+        JsonNode h2Ds = s.cp().post("/datasources", Map.of("name", dsName, "ownerTeamId", s.id("team", "sales-platform"), "state", "ACTIVE",
+                "currentDatabaseId", h2Db.path("id").asText(), "poolPolicy", Map.of("mode", "TRANSACTION", "maxConnections", 2, "minIdle", 0))).expect(201).json();
+        JsonNode h2Grant = s.cp().post("/access-grants", Map.of("applicationId", s.id("app", BATCH), "datasourceId", h2Ds.path("id").asText(), "maxLogicalConnections", 2)).expect(201).json();
+        try {
+            JsonNode resolved = s.cp().internalGet("/internal/resolve/datasource/" + dsName + "?applicationId=" + s.id("app", BATCH)).json();
+            assertThat(resolved.path("database").path("engine").asText()).isEqualTo("H2");
+            assertThat(resolved.path("database").path("jdbcUrl").asText()).isEqualTo("jdbc:h2:tcp://127.0.0.1:" + h2.h2TcpPort() + "/mem:salesh2");
+            JsonNode proxyCfg = s.cp().internalGet("/internal/proxy/config?proxyId=" + Stack.PROXY_ID).json();
+            assertThat(stream(proxyCfg.path("listeners")).map(l -> l.path("engine").asText())).as("no proxy listener for H2").doesNotContain("H2", "OTHER");
+            assertThat(stream(proxyCfg.path("listeners")).flatMap(l -> stream(l.path("routes"))).map(r -> r.path("match").asText())).as("no proxy route for the H2 datasource").doesNotContain(dsName);
+            Results.note("control plane models H2: POST /databases engine H2 -> 201, /internal/resolve -> %s, left out of /internal/proxy/config", resolved.path("database").path("jdbcUrl").asText());
+        } finally {
+            // clean up so the later scenarios see the configuration they expect
+            s.cp().delete("/access-grants/" + h2Grant.path("id").asText());
+            s.cp().delete("/datasources/" + h2Ds.path("id").asText());
+            s.cp().delete("/databases/" + h2Db.path("id").asText());
+        }
     }
 }

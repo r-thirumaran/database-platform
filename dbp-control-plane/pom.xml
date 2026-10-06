@@ -140,6 +140,13 @@
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <configuration>
                     <mainClass>${start-class}</mainClass>
+                    <!-- The repackaged executable replaces the module's MAIN artifact (build log: "Replacing main artifact
+                         target/dbp-control-plane.jar with repackaged archive"), so `mvn install` publishes the runnable jar as
+                         dbp-control-plane-<version>.jar and the same file stays at the fixed path target/dbp-control-plane.jar
+                         (Dockerfile.control-plane and dbp-integration-tests use that path). The thin classes jar remains next
+                         to it as target/dbp-control-plane.jar.original and is never installed. Do not set a classifier or
+                         attach=false here: that would publish the thin jar again. -->
+                    <attach>true</attach>
                 </configuration>
                 <executions>
                     <execution>

@@ -99,12 +99,14 @@ class ResolutionApiTest extends AbstractApiTest {
     @Test
     void proxyConfigEmitsExactlyOneSpellingPerIdentityRule() throws Exception {
         String teamId = team(uniq("team")).get("id").asText();
+        // unique values: the Spring context is shared and RuntimeMergerTest attributes sessions through every application's rules
+        String tag = uniq("spelling");
         String withRules = application(uniq("rules"), teamId, "SERVICE", Map.of("identityRules", Map.of(
-                "serviceAliases", List.of("orders"),
-                "programNames", List.of("orders-service", "JDBC Thin Client/orders"),
-                "pgApplicationNames", List.of("orders-pg"),
-                "machinePatterns", List.of("orders-*"),
-                "cidrs", List.of("10.20.0.0/16")))).get("id").asText();
+                "serviceAliases", List.of(tag + "-alias"),
+                "programNames", List.of(tag + "-program", "JDBC Thin Client/" + tag),
+                "pgApplicationNames", List.of(tag + "-pg"),
+                "machinePatterns", List.of(tag + "-host-*"),
+                "cidrs", List.of("203.0.113.0/24")))).get("id").asText();
         String withoutRules = application(uniq("bare"), teamId, "UI", Map.of()).get("id").asText();
 
         JsonNode cfg = internalGet("/api/v1/internal/proxy/config?proxyId=proxy-spelling", 200);
@@ -120,11 +122,11 @@ class ResolutionApiTest extends AbstractApiTest {
             for (String key : expectedKeys) assertThat(rules.get(key).isArray()).as(key).isTrue();
             checked++;
             if (app.get("id").asText().equals(withRules)) {
-                assertThat(strings(rules.get("serviceAliases"))).containsExactly("orders");
-                assertThat(strings(rules.get("programNames"))).containsExactly("orders-service", "JDBC Thin Client/orders");
-                assertThat(strings(rules.get("pgApplicationNames"))).containsExactly("orders-pg");
-                assertThat(strings(rules.get("machinePatterns"))).containsExactly("orders-*");
-                assertThat(strings(rules.get("cidrs"))).containsExactly("10.20.0.0/16");
+                assertThat(strings(rules.get("serviceAliases"))).containsExactly(tag + "-alias");
+                assertThat(strings(rules.get("programNames"))).containsExactly(tag + "-program", "JDBC Thin Client/" + tag);
+                assertThat(strings(rules.get("pgApplicationNames"))).containsExactly(tag + "-pg");
+                assertThat(strings(rules.get("machinePatterns"))).containsExactly(tag + "-host-*");
+                assertThat(strings(rules.get("cidrs"))).containsExactly("203.0.113.0/24");
             }
             if (app.get("id").asText().equals(withoutRules)) {
                 for (String key : expectedKeys) assertThat(rules.get(key)).as(key).isEmpty();
@@ -140,5 +142,54 @@ class ResolutionApiTest extends AbstractApiTest {
         List<String> out = new java.util.ArrayList<>();
         array.forEach(n -> out.add(n.asText()));
         return out;
+    }
+
+    /** D5: H2 and OTHER databases can be created and resolved; they have no proxy listener. */
+    @Test
+    void h2AndOtherEnginesResolveAndStayOutOfTheProxyConfig() throws Exception {
+        String teamId = team(uniq("team")).get("id").asText();
+        String credId = credential(uniq("cred"), "INLINE", null, "pw").get("id").asText();
+
+        // H2 TCP server: POST /databases engine H2 -> 201, /internal/resolve returns jdbc:h2:tcp://host:port/serviceName
+        JsonNode h2 = database(uniq("h2"), "H2", "h2-host", 9092, "mem:salesh2", credId, List.of("PUBLIC"));
+        assertThat(h2.get("engine").asText()).isEqualTo("H2");
+        String h2Ds = uniq("h2ds");
+        JsonNode ds = datasource(h2Ds, teamId, h2.get("id").asText(), null, null);
+        String app = application(uniq("h2app"), teamId, "SERVICE", Map.of()).get("id").asText();
+        grant(app, ds.get("id").asText(), Map.of());
+        JsonNode resolved = internalGet("/api/v1/internal/resolve/datasource/" + h2Ds + "?applicationId=" + app, 200);
+        assertThat(resolved.get("database").get("engine").asText()).isEqualTo("H2");
+        assertThat(resolved.get("database").get("jdbcUrl").asText()).isEqualTo("jdbc:h2:tcp://h2-host:9092/mem:salesh2");
+        assertThat(resolved.get("credential").get("id").asText()).isEqualTo(credId);
+
+        // OTHER needs the complete URL in jdbcProperties.url: without it 400 with a clear message ...
+        Map<String, Object> other = new java.util.HashMap<>(Map.of("name", uniq("other"), "engine", "OTHER", "host", "mariadb-host", "port", 3306,
+                "serviceName", "sales", "credentialId", credId));
+        JsonNode rejected = postJson("/api/v1/databases", other, 400);
+        assertThat(rejected.toString()).contains("OTHER").contains("jdbcProperties.url");
+        other.put("jdbcProperties", Map.of("url", "  "));
+        postJson("/api/v1/databases", other, 400);
+        // ... and with it the URL is used verbatim
+        other.put("name", uniq("other"));
+        other.put("jdbcProperties", Map.of("url", "jdbc:mariadb://mariadb-host:3306/sales", "useSSL", "false"));
+        JsonNode otherDb = postJson("/api/v1/databases", other, 201);
+        // an update that removes the url is rejected, too
+        Map<String, Object> noUrl = new java.util.HashMap<>(other);
+        noUrl.put("jdbcProperties", Map.of());
+        putJson("/api/v1/databases/" + otherDb.get("id").asText(), noUrl, 400);
+        String otherDs = uniq("otherds");
+        JsonNode ods = datasource(otherDs, teamId, otherDb.get("id").asText(), null, null);
+        grant(app, ods.get("id").asText(), Map.of());
+        JsonNode otherResolved = internalGet("/api/v1/internal/resolve/datasource/" + otherDs + "?applicationId=" + app, 200);
+        assertThat(otherResolved.get("database").get("engine").asText()).isEqualTo("OTHER");
+        assertThat(otherResolved.get("database").get("jdbcUrl").asText()).isEqualTo("jdbc:mariadb://mariadb-host:3306/sales");
+
+        // neither shows up in the proxy configuration: no listener for the engine, no route for the datasources
+        JsonNode cfg = internalGet("/api/v1/internal/proxy/config?proxyId=proxy-h2", 200);
+        for (JsonNode l : cfg.get("listeners")) {
+            assertThat(l.get("engine").asText()).isIn("ORACLE", "POSTGRES", "MSSQL");
+            assertThat(l.get("port").asInt()).isPositive();
+            for (JsonNode r : l.get("routes")) assertThat(r.get("match").asText()).isNotIn(h2Ds, otherDs);
+        }
     }
 }

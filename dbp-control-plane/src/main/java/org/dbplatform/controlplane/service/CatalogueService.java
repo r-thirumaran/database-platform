@@ -233,6 +233,8 @@ public class CatalogueService {
             case ORACLE -> "UNKNOWN";
             case POSTGRES -> "public";
             case MSSQL -> "dbo";
+            case H2 -> "PUBLIC";
+            case OTHER -> "UNKNOWN";
         };
     }
 
@@ -243,7 +245,8 @@ public class CatalogueService {
         return switch (db.getEngine()) {
             case ORACLE -> ident.toUpperCase();
             case POSTGRES -> ident.toLowerCase();
-            case MSSQL -> ident;
+            case H2 -> ident.toUpperCase();
+            case MSSQL, OTHER -> ident;
         };
     }
 

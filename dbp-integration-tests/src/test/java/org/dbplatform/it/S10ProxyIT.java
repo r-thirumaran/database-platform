@@ -70,7 +70,7 @@ class S10ProxyIT {
         Stack.ProxyInfo proxy = s.ensureProxy();
         String url = "jdbc:postgresql://127.0.0.1:" + proxy.pgPort() + "/sales.orders-service?sslmode=disable&ApplicationName=orders-service";
         try (Connection c = DriverManager.getConnection(url, "sales_app", Stack.SALES_APP_PASSWORD)) {
-            assertThat(Sql.queryLong(c, "SELECT count(*) FROM customer")).isGreaterThan(200);
+            assertThat(Sql.queryLong(c, "SELECT count(*) FROM customer")).as("demo data (200 customers; earlier scenarios add more)").isGreaterThanOrEqualTo(200);
             assertThat(Sql.queryString(c, "SELECT current_database()")).as("database name rewritten to the physical one").isEqualTo("sales");
             int clientPort;
             String appName;
@@ -145,6 +145,14 @@ class S10ProxyIT {
         Results.note("proxy health: status=%s listeners=%s", health.path("status").asText(),
                 stream(health.path("listeners")).map(l -> l.path("engine").asText() + ":" + l.path("port").asInt() + (l.path("running").asBoolean() ? "" : "(down)")).toList());
         ControlPlaneApi.Response metrics = s.cp().getAbsolute(proxy.adminUrl() + "/metrics");
-        assertThat(metrics.text()).contains("dbp_proxy_connections_refused_total");
+        assertThat(metrics.text()).contains("dbp_proxy_connections_accepted_total");
+        if ("control-plane".equals(proxy.mode())) {
+            // the control plane's listener has a default route (docs/control-plane-api.md section 10): an unknown logical name is passed through to the
+            // default backend and PostgreSQL itself answers 3D000, so the proxy refuses nothing here (no refused counter is created)
+            Results.note("control-plane mode: unknown logical database 'nosuchdb' goes through the listener's default route and is rejected by PostgreSQL (3D000), not by the proxy");
+        } else {
+            // static configuration without a default route: the proxy refuses the unknown service itself
+            assertThat(metrics.text()).contains("dbp_proxy_connections_refused_total");
+        }
     }
 }

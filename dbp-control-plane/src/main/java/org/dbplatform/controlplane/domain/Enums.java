@@ -4,7 +4,11 @@ package org.dbplatform.controlplane.domain;
 public final class Enums {
     private Enums() {}
 
-    public enum Engine { ORACLE, POSTGRES, MSSQL }
+    /**
+     * Engine of a physical database. {@code H2} (TCP server, e.g. for developers) and {@code OTHER} (any JDBC database, the full
+     * URL comes from {@code jdbcProperties.url}) can be routed to by the gateway but have no proxy listener and no collectors.
+     */
+    public enum Engine { ORACLE, POSTGRES, MSSQL, H2, OTHER }
     public enum ApplicationKind { SERVICE, BATCH, UI, LEGACY, TOOL }
     public enum Runtime { CLOUD_RUN, KUBERNETES, VM, OTHER }
     public enum CredentialProvider { INLINE, ENV, FILE, VAULT, GCP_SECRET_MANAGER, AWS_SECRETS_MANAGER }

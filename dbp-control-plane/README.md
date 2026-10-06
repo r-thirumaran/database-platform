@@ -35,6 +35,9 @@ Then:
 * `POST http://localhost:8080/api/v1/seed/demo` — retail demo dataset (idempotent)
 * `http://localhost:8080/h2-console` (dev profile only; JDBC URL `jdbc:h2:file:./data/dbp`)
 
+The executable `target/dbp-control-plane.jar` is also the module's main Maven artifact (the Spring Boot repackage replaces
+the thin classes jar, which stays at `target/dbp-control-plane.jar.original`), so `mvn install` publishes the runnable jar.
+
 Flyway migrations (`src/main/resources/db/migration`) are written in PostgreSQL-compatible SQL and run
 unchanged on H2 in PostgreSQL mode and on real PostgreSQL (`PostgresMigrationTest` boots the context
 against an embedded PostgreSQL 17).
@@ -88,6 +91,13 @@ answers `501` for them in this POC. Every material request is logged by the
 | `collector` | Scheduler, dictionary crawlers and runtime/audit samplers per engine, mergers |
 | `security` | Service-token filter, optional HTTP Basic filter |
 
+## Database engines
+
+`ORACLE`, `POSTGRES` and `MSSQL` databases get proxy listeners (1521 / 5432 / 1433) and collectors. `H2` (a TCP server:
+`jdbc:h2:tcp://host:port/serviceName`, e.g. `mem:name`) and `OTHER` (any JDBC database; the complete URL goes in
+`jdbcProperties.url`, `POST/PUT /databases` answer `400` without it) are resolved for gateways like any other database but
+are left out of `GET /internal/proxy/config` and have no collector.
+
 ## Collectors
 
 Per database (`collector.enabled`): a **dictionary crawl** every `dictionaryIntervalSeconds`, a
@@ -105,17 +115,29 @@ Per database (`collector.enabled`): a **dictionary crawl** every `dictionaryInte
   OSUSER, PORT, SERVICE_NAME, LOGON_TIME, SQL_ID, PREV_SQL_ID, SQL_EXEC_START), `V$SQL` and `V$SQL_PLAN`
   for new SQL_IDs. Audit: `UNIFIED_AUDIT_TRAIL` by `EVENT_TIMESTAMP`. No Diagnostics/Tuning Pack views
   (no ASH/AWR/`DBA_HIST_*`).
-* **PostgreSQL** — `information_schema.tables/columns`, `pg_matviews`, `pg_stat_user_tables`,
-  `pg_description`, `pg_constraint`, `pg_proc` (+ `prosrc` parsing), `pg_trigger`, `pg_views`; runtime:
-  `pg_stat_activity` and `pg_stat_statements` when installed.
+* **PostgreSQL** — dictionary entirely on `pg_catalog`: `pg_class` + `pg_namespace` (`relkind r/p` = TABLE,
+  `v` = VIEW, `m` = MATERIALIZED_VIEW), `pg_attribute` + `pg_attrdef` (columns: `format_type`, `attnotnull`,
+  `pg_get_expr` defaults), `pg_description`, `pg_constraint`, `pg_proc` (+ `prosrc` parsing), `pg_trigger`,
+  `pg_views` / `pg_matviews`, `pg_stat_user_tables`. `information_schema` is deliberately not used: it only lists
+  objects the connected role holds privileges on, so a least-privilege `pg_monitor` role (no table grants) sees every
+  table, view and materialized view this way. Runtime: `pg_stat_activity`, and `pg_stat_statements` when installed —
+  queried through the schema the extension lives in (looked up in `pg_extension`, independent of `search_path`) in its
+  own try/catch, so an unreadable extension only yields a warning and the session sample is still stored.
 * **SQL Server** — `sys.tables/views/columns/foreign_keys/objects/triggers/sql_expression_dependencies/
   sql_modules`; runtime: `sys.dm_exec_sessions/connections/requests/sql_text`.
+
+Collector connections do **not** inherit the database's `jdbcProperties` wholesale (those are gateway settings such as
+`currentSchema`, `escapeSyntaxCallMode`, `stringtype`, `readOnlyMode`, `ApplicationName`): only connection-level keys are
+copied — `ssl*`, `connectTimeout`, `loginTimeout`, `socketTimeout`, `oracle.net.*`, `oracle.jdbc.ReadTimeout`, `encrypt`,
+`trustServerCertificate` — and the session identifies itself as `dbp-collector` (`ApplicationName` / `V$SESSION.PROGRAM` /
+`applicationName`).
 
 Session attribution: proxy correlation first (session port == `proxyLocalPort` of a live proxied
 connection to the same backend → `PROXY_CORRELATION`, confidence 0.9), then identity rules in contract
 order (`serviceAliases` → `pgApplicationNames`/`programNames` → `machinePatterns` → `cidrs`, →
 `COLLECTOR_SESSION`, confidence 0.6). Table references come from the execution plan when available,
-else from `org.dbplatform.common.sql.SqlAnalyzer` plus a regex scan that also understands procedural bodies.
+else from `org.dbplatform.common.sql.SqlAnalyzer`, which is authoritative for statements it parsed; a regex scan that also
+understands procedural bodies complements it for text it could not parse and for routine / trigger definitions.
 
 ## Tests
 

@@ -21,9 +21,12 @@ import org.dbplatform.controlplane.domain.Enums.ObjectType;
 import org.springframework.stereotype.Component;
 
 /**
- * PostgreSQL dictionary crawler: information_schema.tables/columns, pg_matviews, pg_stat_user_tables (row
- * estimates), pg_description (comments), pg_constraint (FKs), pg_proc (functions/procedures; prosrc parsed
- * for table references), pg_trigger, pg_views (definition parsed → view REFERENCES base tables).
+ * PostgreSQL dictionary crawler, entirely on {@code pg_catalog} so that a least-privilege role (e.g. {@code pg_monitor}
+ * without any table grant) sees every object: pg_class + pg_namespace (relkind r/p = TABLE, v = VIEW, m = MATERIALIZED_VIEW),
+ * pg_attribute + pg_attrdef (columns, types through format_type, defaults through pg_get_expr), pg_matviews / pg_views
+ * (definitions, parsed → view REFERENCES base tables), pg_stat_user_tables (row estimates), pg_description (comments),
+ * pg_constraint (FKs), pg_proc (functions/procedures; prosrc parsed for table references), pg_trigger.
+ * {@code information_schema} is deliberately not used: it only lists objects the connected role holds privileges on.
  */
 @Component
 public class PostgresDictionaryCrawler implements DictionaryCrawler {
@@ -36,38 +39,40 @@ public class PostgresDictionaryCrawler implements DictionaryCrawler {
         if (schemas.isEmpty()) schemas.add("public");
         String in = Jdbc.placeholders(schemas.size());
 
-        Jdbc.forEach(c, "SELECT table_schema, table_name, table_type FROM information_schema.tables WHERE table_schema IN " + in + " AND table_type IN ('BASE TABLE', 'VIEW')", schemas, rs -> {
-            out.tables.add(new TableInfo(rs.getString("table_schema"), rs.getString("table_name"), "VIEW".equals(rs.getString("table_type")) ? Enums.TableKind.VIEW : Enums.TableKind.TABLE));
+        // Everything comes from pg_catalog, which is readable by any role. information_schema.tables/columns only list the
+        // objects the connected role holds privileges on, so a pg_monitor-only collector role would see (almost) nothing.
+        Jdbc.forEach(c, "SELECT n.nspname, c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                + " WHERE c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname IN " + in + " ORDER BY n.nspname, c.relname", schemas, rs -> {
+            out.tables.add(new TableInfo(rs.getString("nspname"), rs.getString("relname"), kindOf(rs.getString("relkind"))));
         });
         Jdbc.forEach(c, "SELECT schemaname, matviewname, definition FROM pg_matviews WHERE schemaname IN " + in, schemas, rs -> {
-            TableInfo t = new TableInfo(rs.getString("schemaname"), rs.getString("matviewname"), Enums.TableKind.MATERIALIZED_VIEW);
-            t.definition = rs.getString("definition");
-            out.tables.add(t);
+            TableInfo t = out.table(rs.getString("schemaname"), rs.getString("matviewname"));
+            if (t != null) t.definition = rs.getString("definition");
         });
         Jdbc.forEach(c, "SELECT schemaname, relname, n_live_tup FROM pg_stat_user_tables WHERE schemaname IN " + in, schemas, rs -> {
             TableInfo t = out.table(rs.getString("schemaname"), rs.getString("relname"));
             if (t != null) t.rowCount = Jdbc.longValue(rs, "n_live_tup");
         });
-        Jdbc.forEach(c, "SELECT table_schema, table_name, column_name, ordinal_position, data_type, character_maximum_length, numeric_precision, numeric_scale, is_nullable, column_default"
-                + " FROM information_schema.columns WHERE table_schema IN " + in + " ORDER BY table_schema, table_name, ordinal_position", schemas, rs -> {
-            TableInfo t = out.table(rs.getString("table_schema"), rs.getString("table_name"));
-            if (t == null) return;
-            Integer pos = Jdbc.integer(rs, "ordinal_position");
-            t.columns.add(new Model.ColumnInfo(rs.getString("column_name"), pos == null ? t.columns.size() + 1 : pos, rs.getString("data_type"),
-                    Jdbc.integer(rs, "character_maximum_length"), Jdbc.integer(rs, "numeric_precision"), Jdbc.integer(rs, "numeric_scale"),
-                    !"NO".equalsIgnoreCase(rs.getString("is_nullable")), rs.getString("column_default"), null));
-        });
-        // materialized view columns are not in information_schema.columns
-        Jdbc.forEach(c, "SELECT n.nspname, c.relname, a.attname, a.attnum, format_type(a.atttypid, a.atttypmod) AS data_type, NOT a.attnotnull AS nullable"
+        // columns of tables, views and materialized views; length/precision/scale are decoded from atttypmod
+        // (1042 bpchar, 1043 varchar: typmod = length + 4; 1700 numeric: typmod = ((precision << 16) | scale) + 4)
+        Jdbc.forEach(c, "SELECT n.nspname, c.relname, a.attname, a.attnum, format_type(a.atttypid, a.atttypmod) AS data_type,"
+                + " CASE WHEN a.atttypid IN (1042, 1043) AND a.atttypmod > 4 THEN a.atttypmod - 4 END AS char_length,"
+                + " CASE WHEN a.atttypid = 1700 AND a.atttypmod >= 4 THEN ((a.atttypmod - 4) >> 16) & 65535 END AS num_precision,"
+                + " CASE WHEN a.atttypid = 1700 AND a.atttypmod >= 4 THEN (a.atttypmod - 4) & 65535 END AS num_scale,"
+                + " NOT a.attnotnull AS nullable, pg_get_expr(d.adbin, d.adrelid) AS column_default"
                 + " FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace"
-                + " WHERE c.relkind = 'm' AND a.attnum > 0 AND NOT a.attisdropped AND n.nspname IN " + in + " ORDER BY n.nspname, c.relname, a.attnum", schemas, rs -> {
+                + " LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum"
+                + " WHERE c.relkind IN ('r', 'p', 'v', 'm') AND a.attnum > 0 AND NOT a.attisdropped AND n.nspname IN " + in
+                + " ORDER BY n.nspname, c.relname, a.attnum", schemas, rs -> {
             TableInfo t = out.table(rs.getString("nspname"), rs.getString("relname"));
             if (t == null) return;
             Integer pos = Jdbc.integer(rs, "attnum");
-            t.columns.add(new Model.ColumnInfo(rs.getString("attname"), pos == null ? t.columns.size() + 1 : pos, rs.getString("data_type"), null, null, null, rs.getBoolean("nullable"), null, null));
+            t.columns.add(new Model.ColumnInfo(rs.getString("attname"), pos == null ? t.columns.size() + 1 : pos, rs.getString("data_type"),
+                    Jdbc.integer(rs, "char_length"), Jdbc.integer(rs, "num_precision"), Jdbc.integer(rs, "num_scale"),
+                    rs.getBoolean("nullable"), rs.getString("column_default"), null));
         });
         Jdbc.forEach(c, "SELECT n.nspname, c.relname, d.objsubid, d.description FROM pg_description d JOIN pg_class c ON c.oid = d.objoid"
-                + " JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'v', 'm', 'p') AND n.nspname IN " + in, schemas, rs -> {
+                + " JOIN pg_namespace n ON n.oid = c.relnamespace WHERE d.classoid = 'pg_class'::regclass AND c.relkind IN ('r', 'p', 'v', 'm') AND n.nspname IN " + in, schemas, rs -> {
             TableInfo t = out.table(rs.getString("nspname"), rs.getString("relname"));
             if (t == null) return;
             Integer sub = Jdbc.integer(rs, "objsubid");
@@ -128,6 +133,15 @@ public class PostgresDictionaryCrawler implements DictionaryCrawler {
             }
         }
         return out;
+    }
+
+    /** pg_class.relkind: r (table) and p (partitioned table) are tables, v a view, m a materialized view. */
+    static Enums.TableKind kindOf(String relkind) {
+        return switch (relkind == null ? "" : relkind) {
+            case "v" -> Enums.TableKind.VIEW;
+            case "m" -> Enums.TableKind.MATERIALIZED_VIEW;
+            default -> Enums.TableKind.TABLE;
+        };
     }
 
     public static String triggerEvent(int tgtype) {

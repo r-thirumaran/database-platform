@@ -151,12 +151,17 @@ class CrawlerUnitTest {
     @Test
     void postgresDictionaryCrawler() throws Exception {
         StubJdbc stub = new StubJdbc()
-                .on("FROM information_schema.tables", List.of(row("table_schema", "sales", "table_name", "orders", "table_type", "BASE TABLE"), row("table_schema", "sales", "table_name", "customer", "table_type", "BASE TABLE"),
-                        row("table_schema", "sales", "table_name", "v_orders", "table_type", "VIEW")))
+                .on("FROM pg_class c", List.of(row("nspname", "sales", "relname", "orders", "relkind", "r"), row("nspname", "sales", "relname", "customer", "relkind", "r"),
+                        row("nspname", "sales", "relname", "events", "relkind", "p"), row("nspname", "sales", "relname", "v_orders", "relkind", "v"),
+                        row("nspname", "sales", "relname", "mv_daily", "relkind", "m")))
                 .on("FROM pg_matviews", List.of(row("schemaname", "sales", "matviewname", "mv_daily", "definition", "select order_id from sales.orders")))
                 .on("FROM pg_stat_user_tables", List.of(row("schemaname", "sales", "relname", "orders", "n_live_tup", 42L)))
-                .on("FROM information_schema.columns", List.of(row("table_schema", "sales", "table_name", "orders", "column_name", "order_id", "ordinal_position", 1, "data_type", "bigint", "character_maximum_length", null, "numeric_precision", 64, "numeric_scale", 0, "is_nullable", "NO", "column_default", "nextval('x')")))
-                .on("FROM pg_attribute a", List.of(row("nspname", "sales", "relname", "mv_daily", "attname", "order_id", "attnum", 1, "data_type", "bigint", "nullable", true)))
+                .on("FROM pg_attribute a", List.of(
+                        row("nspname", "sales", "relname", "orders", "attname", "order_id", "attnum", 1, "data_type", "bigint", "char_length", null, "num_precision", null, "num_scale", null, "nullable", false, "column_default", "nextval('orders_seq'::regclass)"),
+                        row("nspname", "sales", "relname", "orders", "attname", "status", "attnum", 3, "data_type", "character varying(20)", "char_length", 20, "num_precision", null, "num_scale", null, "nullable", true, "column_default", "'NEW'::character varying"),
+                        row("nspname", "sales", "relname", "orders", "attname", "total", "attnum", 4, "data_type", "numeric(12,2)", "char_length", null, "num_precision", 12, "num_scale", 2, "nullable", true, "column_default", null),
+                        row("nspname", "sales", "relname", "v_orders", "attname", "order_id", "attnum", 1, "data_type", "bigint", "char_length", null, "num_precision", null, "num_scale", null, "nullable", true, "column_default", null),
+                        row("nspname", "sales", "relname", "mv_daily", "attname", "order_id", "attnum", 1, "data_type", "bigint", "char_length", null, "num_precision", null, "num_scale", null, "nullable", true, "column_default", null)))
                 .on("FROM pg_description", List.of(row("nspname", "sales", "relname", "orders", "objsubid", 0, "description", "Orders"), row("nspname", "sales", "relname", "orders", "objsubid", 1, "description", "pk")))
                 .on("FROM pg_constraint", List.of(row("nspname", "sales", "relname", "orders", "ref_schema", "sales", "ref_table", "customer")))
                 .on("FROM pg_proc", List.of(row("nspname", "sales", "proname", "place_order", "prokind", "p", "prosrc", "BEGIN INSERT INTO sales.orders(order_id) VALUES (1); PERFORM 1 FROM customer; END", "lanname", "plpgsql"),
@@ -164,12 +169,34 @@ class CrawlerUnitTest {
                 .on("FROM pg_trigger", List.of(row("nspname", "sales", "tgname", "trg_orders_audit", "relname", "orders", "tgtype", 5, "tgenabled", "O", "proname", "audit_fn", "proc_schema", "sales")))
                 .on("FROM pg_views", List.of(row("schemaname", "sales", "viewname", "v_orders", "definition", "SELECT o.order_id FROM sales.orders o JOIN sales.customer c ON c.id = o.customer_id")));
         CrawlResult r = new PostgresDictionaryCrawler().crawl(stub.connection(), db(Enums.Engine.POSTGRES), List.of("sales"));
-        assertThat(r.tables).extracting(t -> t.name).containsExactlyInAnyOrder("orders", "customer", "v_orders", "mv_daily");
+        assertThat(r.tables).extracting(t -> t.name).containsExactlyInAnyOrder("orders", "customer", "events", "v_orders", "mv_daily");
+        // discovery is on pg_catalog only: information_schema lists just the objects the collector role has privileges on (defect D1)
+        assertThat(stub.executed).noneMatch(sql -> sql.toLowerCase().contains("information_schema"));
+        String tableSql = stub.executed.stream().filter(sql -> sql.contains("FROM pg_class c")).findFirst().orElseThrow();
+        assertThat(tableSql).contains("pg_namespace").contains("c.relkind IN ('r', 'p', 'v', 'm')");
+        String columnSql = stub.executed.stream().filter(sql -> sql.contains("FROM pg_attribute a")).findFirst().orElseThrow();
+        assertThat(columnSql).contains("a.attnum > 0").contains("NOT a.attisdropped").contains("format_type(a.atttypid, a.atttypmod)")
+                .contains("a.attnotnull").contains("LEFT JOIN pg_attrdef").contains("pg_get_expr(d.adbin, d.adrelid)");
+        // relkind r / p -> TABLE, v -> VIEW, m -> MATERIALIZED_VIEW
+        assertThat(r.table("sales", "orders").kind).isEqualTo(Enums.TableKind.TABLE);
+        assertThat(r.table("sales", "events").kind).isEqualTo(Enums.TableKind.TABLE);
+        assertThat(r.table("sales", "v_orders").kind).isEqualTo(Enums.TableKind.VIEW);
+        assertThat(r.table("sales", "mv_daily").kind).isEqualTo(Enums.TableKind.MATERIALIZED_VIEW);
+        assertThat(r.table("sales", "mv_daily").definition).contains("sales.orders");
         assertThat(r.table("sales", "orders").rowCount).isEqualTo(42L);
         assertThat(r.table("sales", "orders").comment).isEqualTo("Orders");
         assertThat(r.table("sales", "orders").columns.get(0).comment()).isEqualTo("pk");
         assertThat(r.table("sales", "orders").columns.get(0).nullable()).isFalse();
-        assertThat(r.table("sales", "mv_daily").kind).isEqualTo(Enums.TableKind.MATERIALIZED_VIEW);
+        assertThat(r.table("sales", "orders").columns.get(0).defaultValue()).isEqualTo("nextval('orders_seq'::regclass)");
+        Model.ColumnInfo status = r.table("sales", "orders").columns.get(1);
+        assertThat(status.dataType()).isEqualTo("character varying(20)");
+        assertThat(status.length()).isEqualTo(20);
+        assertThat(status.nullable()).isTrue();
+        Model.ColumnInfo total = r.table("sales", "orders").columns.get(2);
+        assertThat(total.dataType()).isEqualTo("numeric(12,2)");
+        assertThat(total.precision()).isEqualTo(12);
+        assertThat(total.scale()).isEqualTo(2);
+        assertThat(r.table("sales", "v_orders").columns).hasSize(1);
         assertThat(r.table("sales", "mv_daily").columns).hasSize(1);
         Model.RoutineInfo trg = r.routine("sales", "trg_orders_audit");
         assertThat(trg.kind).isEqualTo(Enums.RoutineKind.TRIGGER);
@@ -190,13 +217,17 @@ class CrawlerUnitTest {
         assertThat(PostgresDictionaryCrawler.triggerEvent(2 + 4 + 16)).isEqualTo("BEFORE INSERT OR UPDATE");
     }
 
+    private static final List<java.util.Map<String, Object>> ACTIVITY = List.of(row("pid", 4242, "datname", "sales", "usename", "sales_app", "application_name", "orders-service", "client_addr", "10.20.1.2", "client_port", 40321,
+            "backend_start", Instant.parse("2026-02-02T10:00:00Z"), "state", "active", "query", "select * from sales.orders where id = $1", "query_start", Instant.parse("2026-02-02T10:00:00Z")));
+    private static final List<java.util.Map<String, Object>> STATEMENTS = List.of(row("queryid", 99L, "query", "update sales.orders set status = $1", "calls", 7L, "total_exec_time", 12.5d, "rows", 7L));
+
     @Test
     void postgresRuntimeSampler() throws Exception {
-        Instant t = Instant.parse("2026-02-02T10:00:00Z");
+        // the extension lives in "public" while the collector session may have any search_path: the query is schema qualified
         StubJdbc stub = new StubJdbc()
-                .on("FROM pg_stat_activity", List.of(row("pid", 4242, "datname", "sales", "usename", "sales_app", "application_name", "orders-service", "client_addr", "10.20.1.2", "client_port", 40321, "backend_start", t, "state", "active", "query", "select * from sales.orders where id = $1", "query_start", t)))
-                .on("FROM pg_extension", List.of(row("?column?", 1)))
-                .on("FROM pg_stat_statements", List.of(row("queryid", 99L, "query", "update sales.orders set status = $1", "calls", 7L, "total_exec_time", 12.5d, "rows", 7L)));
+                .on("FROM pg_stat_activity", ACTIVITY)
+                .on("FROM pg_extension", List.of(row("nspname", "public")))
+                .on("\"public\".pg_stat_statements", STATEMENTS);
         Model.RuntimeSample s = new PostgresRuntimeSampler().sample(stub.connection(), db(Enums.Engine.POSTGRES), Set.of(), 50);
         assertThat(s.sessions).hasSize(1);
         assertThat(s.sessions.get(0).program).isEqualTo("orders-service");
@@ -205,6 +236,58 @@ class CrawlerUnitTest {
         assertThat(s.statements).hasSize(1);
         assertThat(s.statements.get(0).sqlId).isEqualTo("pgss:99");
         assertThat(s.statements.get(0).elapsedMicros).isEqualTo(12500);
+        assertThat(s.warnings).isEmpty();
+        // the extension schema is resolved from the catalogue, and the statements query never relies on the search_path
+        assertThat(stub.executed).anyMatch(sql -> sql.contains("pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace") && sql.contains("e.extname = 'pg_stat_statements'"));
+        assertThat(stub.executed).anyMatch(sql -> sql.contains("FROM \"public\".pg_stat_statements ORDER BY calls DESC LIMIT 50"));
+        assertThat(stub.executed).noneMatch(sql -> sql.contains("FROM pg_stat_statements"));
+    }
+
+    @Test
+    void postgresRuntimeSamplerQualifiesWithWhateverSchemaTheExtensionIsIn() throws Exception {
+        StubJdbc stub = new StubJdbc()
+                .on("FROM pg_stat_activity", ACTIVITY)
+                .on("FROM pg_extension", List.of(row("nspname", "Mon\"itor")))
+                .on(".pg_stat_statements", STATEMENTS);
+        Model.RuntimeSample s = new PostgresRuntimeSampler().sample(stub.connection(), db(Enums.Engine.POSTGRES), Set.of("pgss:1"), 5);
+        assertThat(s.statements).hasSize(1);
+        assertThat(stub.executed).anyMatch(sql -> sql.contains("FROM \"Mon\"\"itor\".pg_stat_statements ORDER BY calls DESC LIMIT 5"));
+    }
+
+    @Test
+    void postgresRuntimeSamplerWithoutTheExtensionSamplesSessionsOnly() throws Exception {
+        StubJdbc stub = new StubJdbc()
+                .on("FROM pg_stat_activity", ACTIVITY)
+                .on("FROM pg_extension", List.of());
+        Model.RuntimeSample s = new PostgresRuntimeSampler().sample(stub.connection(), db(Enums.Engine.POSTGRES), Set.of(), 50);
+        assertThat(s.sessions).hasSize(1);
+        assertThat(s.statements).isEmpty();
+        assertThat(s.warnings).isEmpty();
+        assertThat(stub.executed).noneMatch(sql -> sql.contains("pg_stat_statements ORDER BY"));
+    }
+
+    @Test
+    void postgresRuntimeSamplerSurvivesAFailingStatementsQuery() throws Exception {
+        // D2: the statements query used to abort the whole sample (relation "pg_stat_statements" does not exist) so lastRuntimeRun was never set
+        StubJdbc stub = new StubJdbc()
+                .on("FROM pg_stat_activity", ACTIVITY)
+                .on("FROM pg_extension", List.of(row("nspname", "public")))
+                .fail("\"public\".pg_stat_statements ORDER BY", new SQLException("ERROR: permission denied for view pg_stat_statements", "42501"));
+        Model.RuntimeSample s = new PostgresRuntimeSampler().sample(stub.connection(), db(Enums.Engine.POSTGRES), Set.of(), 50);
+        assertThat(s.sessions).hasSize(1);
+        assertThat(s.statements).isEmpty();
+        assertThat(s.warnings).singleElement().asString().contains("pg_stat_statements").contains("permission denied");
+        // ... and so does a failing extension lookup
+        StubJdbc stub2 = new StubJdbc()
+                .on("FROM pg_stat_activity", ACTIVITY)
+                .fail("FROM pg_extension", new SQLException("boom"));
+        Model.RuntimeSample s2 = new PostgresRuntimeSampler().sample(stub2.connection(), db(Enums.Engine.POSTGRES), Set.of(), 50);
+        assertThat(s2.sessions).hasSize(1);
+        assertThat(s2.warnings).hasSize(1);
+        // but a failing pg_stat_activity read is still an error of the run
+        StubJdbc stub3 = new StubJdbc().fail("FROM pg_stat_activity", new SQLException("no access"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new PostgresRuntimeSampler().sample(stub3.connection(), db(Enums.Engine.POSTGRES), Set.of(), 50))
+                .isInstanceOf(SQLException.class);
     }
 
     @Test
@@ -245,6 +328,22 @@ class CrawlerUnitTest {
         assertThat(s.sessions.get(0).sqlId).isEqualTo("010203");
         assertThat(s.sessions.get(0).machine).isEqualTo("ORDERS-7F9C");
         assertThat(s.sessions.get(0).port).isEqualTo(40321);
+    }
+
+    @Test
+    void sqlRefsTrustTheAnalyzerWhenItParsedTheStatementAndScanProceduralTextOtherwise() {
+        var pg = org.dbplatform.common.telemetry.Engine.POSTGRES;
+        // parsed by SqlAnalyzer (parseOk): its tables are authoritative, no regex noise from literals
+        assertThat(SqlRefs.extract("SELECT 'copied from nowhere' AS note, o.id FROM sales.orders o JOIN sales.customer c ON c.id = o.customer_id", pg))
+                .containsExactlyInAnyOrder(new SqlRefs.Ref("sales", "orders", false), new SqlRefs.Ref("sales", "customer", false));
+        // a plpgsql body is not a statement the parser understands: the regex scan finds the writes and reads of the body
+        assertThat(SqlRefs.extract("BEGIN\n INSERT INTO sales.orders(id) VALUES (1);\n PERFORM 1 FROM customer;\n UPDATE sales.inventory SET qty = qty - 1;\nEND", pg))
+                .contains(new SqlRefs.Ref("sales", "orders", true), new SqlRefs.Ref(null, "customer", false), new SqlRefs.Ref("sales", "inventory", true));
+        // routine definitions are DDL to the analyzer (parseOk, but the body is not walked): the regex scan still finds the body's tables
+        assertThat(SqlRefs.extract("CREATE PROCEDURE PlaceOrder AS INSERT INTO dbo.Orders (Id) VALUES (1); SELECT 1 FROM Customer", org.dbplatform.common.telemetry.Engine.MSSQL))
+                .contains(new SqlRefs.Ref("dbo", "Orders", true), new SqlRefs.Ref(null, "Customer", false));
+        assertThat(SqlRefs.extract(null, pg)).isEmpty();
+        assertThat(SqlRefs.extract("   ", null)).isEmpty();
     }
 
     @Test

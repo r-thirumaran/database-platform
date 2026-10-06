@@ -76,6 +76,7 @@ public class CollectorScheduler {
         Instant now = Instant.now();
         for (DatabaseInstance db : all) {
             if (!db.getCollector().isEnabled()) { live.clearCollectorSnapshot(db.getId()); continue; }
+            if (!crawlers.containsKey(db.getEngine()) && !samplers.containsKey(db.getEngine())) continue; // H2 / OTHER: no collector exists
             if (due(db, CollectWhat.DICTIONARY, db.getCollector().getDictionaryIntervalSeconds(), now)) trigger(db, CollectWhat.DICTIONARY);
             if (due(db, CollectWhat.RUNTIME, db.getCollector().getRuntimeIntervalSeconds(), now)) trigger(db, CollectWhat.RUNTIME);
             if (db.getCollector().isAuditTrail() && due(db, CollectWhat.AUDIT, Math.max(60, db.getCollector().getRuntimeIntervalSeconds() * 4), now)) trigger(db, CollectWhat.AUDIT);

@@ -11,6 +11,7 @@ import org.dbplatform.controlplane.api.error.ApiException;
 import org.dbplatform.controlplane.collector.CollectorConnections;
 import org.dbplatform.controlplane.domain.DatabaseInstance;
 import org.dbplatform.controlplane.domain.DbTable;
+import org.dbplatform.controlplane.domain.Enums;
 import org.dbplatform.controlplane.domain.Ids;
 import org.dbplatform.controlplane.domain.Routine;
 import org.dbplatform.controlplane.repo.CredentialRepository;
@@ -139,6 +140,12 @@ public class DatabaseService {
         }
         if (in.getCollector().getCredentialId() != null && credentials.findById(in.getCollector().getCredentialId()).isEmpty()) {
             throw new ApiException.BadRequest("Unknown collector.credentialId '" + in.getCollector().getCredentialId() + "'");
+        }
+        if (in.getEngine() == Enums.Engine.OTHER) {
+            String url = in.getJdbcProperties() == null ? null : in.getJdbcProperties().get(JdbcUrls.URL_PROPERTY);
+            if (url == null || url.isBlank()) {
+                throw new ApiException.BadRequest("engine OTHER requires the full JDBC URL in jdbcProperties.url (e.g. \"jdbc:mariadb://host:3306/db\")");
+            }
         }
         d.setName(in.getName());
         d.setEngine(in.getEngine());

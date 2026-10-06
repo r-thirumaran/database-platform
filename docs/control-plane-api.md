@@ -84,9 +84,9 @@ Identity rules are how **proxy** and **collectors** map observed connections to 
 
 `Database`
 ```json
-{ "id": "…", "name": "sales-oracle-prod", "engine": "ORACLE | POSTGRES | MSSQL",
+{ "id": "…", "name": "sales-oracle-prod", "engine": "ORACLE | POSTGRES | MSSQL | H2 | OTHER",
   "host": "oracle.example.org", "port": 1521,
-  "serviceName": "FREEPDB1",            // ORACLE service name, POSTGRES/MSSQL database name
+  "serviceName": "FREEPDB1",            // ORACLE service name, POSTGRES/MSSQL database name, H2 "mem:name" or file path
   "credentialId": "…",                  // credential the platform itself uses (gateway pools, collectors)
   "maxPhysicalConnections": 60,
   "jdbcProperties": { "oracle.jdbc.ReadTimeout": "60000" },
@@ -95,6 +95,9 @@ Identity rules are how **proxy** and **collectors** map observed connections to 
   "description": "…", "tags": [], "createdAt": "…", "updatedAt": "…" }
 ```
 * `GET /databases`, `POST /databases`, `GET /databases/{id}`, `PUT /databases/{id}`, `DELETE /databases/{id}`
+* `H2` resolves to `jdbc:h2:tcp://host:port/serviceName`. `OTHER` needs the complete JDBC URL in `jdbcProperties.url`
+  (`400` without it). `H2` and `OTHER` databases can be routed to by gateways but have no proxy listener (they are left out of
+  `GET /internal/proxy/config`) and no collectors.
 * `POST /databases/{id}/test-connection` → `{ "ok": true, "productName": "…", "productVersion": "…", "latencyMs": 12 }`; an unreachable
   database or an unresolvable credential answers **200** `{ "ok": false, "latencyMs": 6, "message": "…" }` (never a 5xx)
 * `POST /databases/{id}/collect` `{ "what": "DICTIONARY | RUNTIME | AUDIT" }` → `{ "started": true }` (manual trigger)

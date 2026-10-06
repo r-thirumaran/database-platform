@@ -5,7 +5,6 @@ import org.dbplatform.it.support.Await;
 import org.dbplatform.it.support.ControlPlaneApi;
 import org.dbplatform.it.support.ItExtension;
 import org.dbplatform.it.support.Results;
-import org.dbplatform.it.support.Sql;
 import org.dbplatform.it.support.Stack;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.MethodOrderer;
@@ -115,36 +114,21 @@ class S06TelemetryIT {
     void dictionary_crawl_catalogues_routines_triggers_and_dependencies() throws Exception {
         Stack s = Stack.current();
         String dbId = s.id("db", DB_PG);
-        // 1. the crawl that ran at import time used the grants shipped in demo/sql/postgres/40_grants_app.sql (dbp_collector: pg_monitor + SELECT on audit_log only)
-        JsonNode shipped = Await.until("first dictionary crawl (shipped collector grants) finished", Duration.ofSeconds(90), () -> {
+        // the crawl that runs after the import uses the grants shipped in demo/sql/postgres/40_grants_app.sql only
+        // (dbp_collector: pg_monitor + SELECT on audit_log, deliberately no table access): discovery reads pg_catalog
+        JsonNode status = Await.until("dictionary crawl (shipped collector grants) finished with all sales tables and the routines", Duration.ofSeconds(120), () -> {
             JsonNode st = s.cp().get("/databases/" + dbId + "/collector-status").json();
-            return st.path("lastDictionaryRun").isTextual() ? Optional.of(st) : Optional.empty();
-        });
-        List<JsonNode> tablesBefore = items(s.cp().get("/tables?databaseId=" + dbId + "&schema=sales&size=500").json()).toList();
-        long crawledBefore = tablesBefore.stream().filter(t -> !t.path("discovered").asBoolean()).count();
-        Results.note("crawl with the shipped grants: collector-status.tablesSeen=%s routinesSeen=%s, %d of %d sales tables catalogued (not 'discovered'): %s",
-                shipped.path("tablesSeen").asText(), shipped.path("routinesSeen").asText(), crawledBefore, tablesBefore.size(),
-                tablesBefore.stream().filter(t -> !t.path("discovered").asBoolean()).map(t -> t.path("name").asText()).toList());
-        if (crawledBefore < 8) {
-            // workaround (test only, demo scripts untouched): information_schema.tables/columns are privilege filtered in PostgreSQL
-            try (Connection su = s.pgSuperuser("sales")) {
-                Sql.exec(su, "GRANT SELECT ON ALL TABLES IN SCHEMA sales TO dbp_collector");
-            }
-            Results.partial("PostgresDictionaryCrawler reads information_schema.tables/columns, which only list objects the collector role has privileges on;"
-                    + " with the shipped grants only " + crawledBefore + " of 8 tables were catalogued (view typed as TABLE, routine->table dependencies missing)."
-                    + " Workaround applied by the test: GRANT SELECT ON ALL TABLES IN SCHEMA sales TO dbp_collector, then re-crawl");
-        }
-        JsonNode started = s.cp().post("/databases/" + dbId + "/collect", Map.of("what", "DICTIONARY")).json();
-        assertThat(started.has("started")).isTrue();
-        String firstRun = shipped.path("lastDictionaryRun").asText();
-        JsonNode status = Await.until("dictionary crawl with full visibility finished", Duration.ofSeconds(120), () -> {
-            JsonNode st = s.cp().get("/databases/" + dbId + "/collector-status").json();
-            if (!st.path("lastDictionaryRun").isTextual() || st.path("lastDictionaryRun").asText().equals(firstRun) || st.path("tablesSeen").asInt() < 8) {
+            if (!st.path("lastDictionaryRun").isTextual() || st.path("tablesSeen").asInt() < 8) {
                 return Optional.empty();
             }
             Optional<JsonNode> place = routine(s, "order_pkg_place_order");
             return place.isPresent() && !place.get().path("discovered").asBoolean() ? Optional.of(st) : Optional.empty();
         });
+        List<JsonNode> salesTables = items(s.cp().get("/tables?databaseId=" + dbId + "&schema=sales&size=500").json()).toList();
+        List<String> crawled = salesTables.stream().filter(t -> !t.path("discovered").asBoolean()).map(t -> t.path("name").asText()).sorted().toList();
+        assertThat(crawled).as("every sales table is catalogued by the crawl itself (not a 'discovered' placeholder) although the collector role has no table privileges")
+                .containsExactlyInAnyOrder("audit_log", "customer", "inventory", "order_item", "orders", "payment", "product", "v_customer_order_summary");
+        assertThat(status.path("lastError").isNull() || status.path("lastError").asText().isEmpty()).as("collector-status.lastError after the crawl: %s", status.path("lastError")).isTrue();
         JsonNode placeOrder = routine(s, "order_pkg_place_order").orElseThrow();
         assertThat(placeOrder.path("kind").asText()).isEqualTo("PROCEDURE");
         assertThat(routine(s, "get_customer_tier").map(r -> r.path("kind").asText())).contains("FUNCTION");
@@ -172,9 +156,10 @@ class S06TelemetryIT {
         assertThat(customer.path("rowCountEstimate").asLong()).isGreaterThanOrEqualTo(0);
         JsonNode columns = s.cp().get("/tables/" + tableId(s, "customer") + "/columns").json();
         assertThat(stream(columns).map(c -> c.path("name").asText())).contains("email", "country_code");
-        Results.note("collector-status: lastError=%s tablesSeen=%s routinesSeen=%s; place_order deps=%d kinds=%s tables=%s; schema sales: %s tables / %s routines%s",
-                status.path("lastError").asText(null), status.path("tablesSeen").asText(), status.path("routinesSeen").asText(), items(deps).count(), depKinds, tables,
-                sales.path("tableCount").asText(), sales.path("routineCount").asText(), s.pg().statStatementsLoaded() ? "" : " (pg_stat_statements not preloaded)");
+        Results.note("crawl with the shipped grants (pg_monitor + SELECT on audit_log only, no workaround): collector-status lastError=%s tablesSeen=%s routinesSeen=%s; %d of 8 sales tables catalogued: %s;"
+                        + " place_order deps=%d kinds=%s tables=%s; schema sales: %s tables / %s routines; v_customer_order_summary kind=%s%s",
+                status.path("lastError").asText(null), status.path("tablesSeen").asText(), status.path("routinesSeen").asText(), crawled.size(), crawled, items(deps).count(), depKinds, tables,
+                sales.path("tableCount").asText(), sales.path("routineCount").asText(), view.path("kind").asText(), s.pg().statStatementsLoaded() ? "" : " (pg_stat_statements not preloaded)");
     }
 
     @Test
@@ -239,5 +224,30 @@ class S06TelemetryIT {
         ControlPlaneApi.Response governance = s.cp().post("/governance/evaluate", null);
         assertThat(governance.status()).isEqualTo(200);
         Results.note("governance evaluate: %s; open violations: %d", governance.body(), items(s.cp().get("/governance/violations?status=OPEN").json()).count());
+    }
+
+    @Test
+    @Order(7)
+    void runtime_sampler_completes_although_the_database_sets_current_schema() {
+        Stack s = Stack.current();
+        String dbId = s.id("db", DB_PG);
+        // sales-postgres carries jdbcProperties.currentSchema=sales (a gateway setting) while pg_stat_statements is installed in public:
+        // the collector connection must not inherit it and the sample must complete (it used to abort on every run)
+        JsonNode db = s.cp().get("/databases/" + dbId).json();
+        assertThat(db.path("jdbcProperties").path("currentSchema").asText()).as("precondition: the bootstrap database sets currentSchema").isEqualTo("sales");
+        s.cp().post("/databases/" + dbId + "/collect", Map.of("what", "RUNTIME"));
+        JsonNode status = Await.until("collector-status.lastRuntimeRun is set and lastError cleared", Duration.ofSeconds(60), () -> {
+            JsonNode st = s.cp().get("/databases/" + dbId + "/collector-status").json();
+            boolean noError = st.path("lastError").isNull() || st.path("lastError").asText().isEmpty();
+            return st.path("lastRuntimeRun").isTextual() && noError ? Optional.of(st) : Optional.empty();
+        });
+        JsonNode collectorRows = Await.until("GET /connections/live has COLLECTOR rows for the sales database", Duration.ofSeconds(60), () -> {
+            JsonNode live = s.cp().get("/connections/live").json();
+            long rows = items(live).filter(x -> "COLLECTOR".equals(x.path("source").asText())).count();
+            return rows > 0 ? Optional.of(live) : Optional.empty();
+        });
+        Results.note("runtime sampler with currentSchema=sales on the database: lastRuntimeRun=%s lastError=%s sessionsSeen=%s; %d COLLECTOR rows in /connections/live",
+                status.path("lastRuntimeRun").asText(), status.path("lastError").asText(null), status.path("sessionsSeen").asText(),
+                items(collectorRows).filter(x -> "COLLECTOR".equals(x.path("source").asText())).count());
     }
 }

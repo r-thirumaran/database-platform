@@ -333,7 +333,9 @@ public class TelemetryIngestService {
             case ORACLE -> Enums.Engine.ORACLE;
             case POSTGRES -> Enums.Engine.POSTGRES;
             case MSSQL -> Enums.Engine.MSSQL;
-            default -> null;
+            case H2 -> Enums.Engine.H2;
+            case OTHER -> Enums.Engine.OTHER;
+            case TCP -> null; // raw pass-through of the proxy: no database behind it that the control plane models
         };
     }
 }

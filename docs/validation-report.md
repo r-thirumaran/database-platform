@@ -9,6 +9,10 @@ REST API). The tests live in [`dbp-integration-tests/`](../dbp-integration-tests
 Date: 2026-10-05. Repository state: commit `ffd8ad7` plus uncommitted work of the other agents (the gateway, UI,
 control-plane, proxy and common sources were being edited concurrently; the jars named below are what was tested).
 
+**Update 2026-10-06:** the control-plane defects D1, D2, D3, D5 and D7 were fixed or resolved (status line at the head of
+each defect in section 3) and the scenarios that exercise them were re-run — see section 2a. Rows marked "re-run 2026-10-06"
+below replace the run 3 result of that row; everything else is the run 3 record as it was.
+
 ## 1. Environment
 
 | Item | Value |
@@ -39,6 +43,7 @@ the contract could not be exercised or a deviation was recorded (see notes and s
 failed. The table is the one the module writes to `target/it/results.md`.
 
 Final run (run 3, 2026-10-05 21:35 UTC): `Tests run: 41, Failures: 0, Errors: 0, Skipped: 0 — BUILD SUCCESS` in 1:55 min; 32 PASS, 9 PARTIAL, 0 FAIL.
+These totals are the run 3 record and are **not** recomputed: after the fixes only some scenario classes were re-run (section 2a).
 
 | Scenario | Test | Result | Notes |
 |---|---|---|---|
@@ -69,20 +74,42 @@ Final run (run 3, 2026-10-05 21:35 UTC): `Tests run: 41, Failures: 0, Errors: 0,
 | 6 Telemetry round trip | top queries show normalised statements with their tables | PASS | 26 distinct statements for orders-service; e.g. SELECT count(*) FROM customer WHERE id = ? (count 200, tables [customer]); CALL: {call order_pkg_place_order(?, ?, ?, ?)} |
 | 6 Telemetry round trip | tables endpoint lists the sales schema | PASS | sales tables known to the catalogue: {product=true, audit_log=false, order_item=true, v_customer_order_summary=true, payment=true, orders=true, inventory=true, customer=true} |
 | 6 Telemetry round trip | application summary shows reads on customer and orders and calls on place order | PASS | reads=[customer, order_item, orders, payment, product] writes=[customer, inventory, order_item, orders] calls=[ORDER_PKG.PLACE_ORDER, get_customer_tier, get_orders_for_customer, order_pkg_place_order] queryStats={"count24h":286,"count7d":286,"lastSeenAt":"2026-10-05T21:35:41.267216Z","avgDurationMs":46.69,"errors24h":6} |
-| 6 Telemetry round trip | dictionary crawl catalogues routines triggers and dependencies | PARTIAL | crawl with the shipped grants: collector-status.tablesSeen=1 routinesSeen=11, 1 of 8 sales tables catalogued (not 'discovered'): [audit_log]; PARTIAL: PostgresDictionaryCrawler reads information_schema.tables/columns, which only list objects the collector role has privileges on; with the shipped grants only 1 of 8 tables were catalogued (view typed as TABLE, routine->table dependencies missing). Workaround applied by the test: GRANT SELECT ON ALL TABLES IN SCHEMA sales TO dbp_collector, then re-crawl; collector-status: lastError=null tablesSeen=8 routinesSeen=11; place_order deps=8 kinds=[REFERENCES, READS, WRITES] tables=[audit_log, inventory, order_item, orders, payment, product]; schema sales: 8 tables / 11 routines |
+| 6 Telemetry round trip | dictionary crawl catalogues routines triggers and dependencies | PASS | re-run 2026-10-06 (D1 fixed, GRANT workaround removed): crawl with the shipped grants (pg_monitor + SELECT on audit_log only): collector-status lastError=null tablesSeen=8 routinesSeen=11; 8 of 8 sales tables catalogued: [audit_log, customer, inventory, order_item, orders, payment, product, v_customer_order_summary]; place_order deps=8 kinds=[REFERENCES, READS, WRITES] tables=[audit_log, inventory, order_item, orders, payment, product]; schema sales: 8 tables / 11 routines; v_customer_order_summary kind=VIEW |
 | 6 Telemetry round trip | call expansion attributes tables written via the routine to the caller | PASS | orders.summary consumer: orders-service WRITES via order_pkg_place_order (confidence 1.0); indirect consumers also on payment, order_item, audit_log (trigger) |
 | 6 Telemetry round trip | impact analysis and graph include the consumers | PASS | impact(orders): riskScore=0.51 factors=[1 consuming team, 7 consuming applications, written by trigger, referenced by 5 routines, 1 dependent view, 402 queries in 7d] direct=3 indirect=4; graph(application, depth 2): 32 nodes [TEAM, APPLICATION, DATABASE, DATASOURCE, TABLE, ROUTINE], edges [BELONGS_TO, OWNS, ROUTES_TO, GRANTED, HOSTS, PRODUCES, CALLS, FOREIGN_KEY, REFERENCES, READS, WRITES, TRIGGERS]; governance evaluate: {"violations":7,"inferredProducers":5,"resolved":0,"ok":true}; open violations: 7 |
+| 6 Telemetry round trip | runtime sampler completes although the database sets current schema | PASS | re-run 2026-10-06 (new test, D2 fixed): sales-postgres carries jdbcProperties.currentSchema=sales and pg_stat_statements lives in public; collector-status lastRuntimeRun=2026-10-06T04:19:58Z lastError=null sessionsSeen=1; 1 COLLECTOR row in /connections/live |
 | 7 Credential rotation | rotation bumps the version drains the old pool and keeps traffic flowing | PASS | credential sales-postgres-app v1 -> v2; gateway switched pools in 257 ms (old pool drained & closed), /stats/pools credentialVersion=2; 137 statements + 14 new connections during rotation, 0 errors |
 | 8 Routing rule, datasource switch, second engine | routing rule moves reporting batch to sales alt while orders service stays on sales | PASS | rule(priority 5, reporting-batch -> sales-alt): batch connections hit sales_alt (3 customers), orders-service stayed on sales; rule removed -> back on sales; gateway pools: [4b232141-05e6-4cbc-9415-90e5f4d87875@v2, af65aeaa-bd1e-44d9-9875-27d7473a8a4c@v2] |
 | 8 Routing rule, datasource switch, second engine | switch moves new connections while a pinned transaction keeps its database | PASS | after COMMIT the existing logical connection re-resolved to sales_alt on its next pin (README: existing sessions follow at the next pin); switch sales -> sales-alt -> sales: new connections followed each switch within the 1 s config poll; 2 MigrationEvents recorded |
-| 8 Routing rule, datasource switch, second engine | h2 in oracle mode is reachable through a static mode gateway | PARTIAL | second engine: H2 2.3.232 (2024-08-11) via jdbc:dbp (static YAML datasource sales-h2, gateway it-gw-h2); PARTIAL: the control plane cannot model an H2 database (Enums.Engine = ORACLE\|POSTGRES\|MSSQL; POST /databases engine H2 -> HTTP 400), so the second engine was validated behind a static-mode gateway and the control-plane routing switch used a second PostgreSQL database (sales_alt) |
+| 8 Routing rule, datasource switch, second engine | h2 in oracle mode is reachable through a static mode gateway | PASS | re-run 2026-10-06 (D5 fixed): second engine: H2 2.3.232 (2024-08-11) via jdbc:dbp (static YAML datasource sales-h2, gateway it-gw-h2); control plane models H2: POST /databases engine H2 -> 201, /internal/resolve -> jdbc:h2:tcp://127.0.0.1:37421/mem:salesh2, left out of /internal/proxy/config |
 | 9 Access control | application without a grant is rejected with 08004 | PASS | no-grant-app (valid key, no grant): SQLNonTransientConnectionException[08004/0]: application 'no-grant-app' is not authorised for datasource 'sales' |
 | 9 Access control | wrong or missing api key is rejected with 08004 | PASS | wrong key: invalid api key; missing key: apiKey is required; unknown datasource: unknown datasource 'nosuchds' |
 | 9 Access control | revoked key is rejected for new connections | PASS | revoked key rejected for new connections after 1022 ms (auth cache invalidated by the configVersion bump); the session opened before revocation kept working (authentication is at HELLO time only) |
 | 9 Access control | read only grant blocks writes | PARTIAL | legacy-reporting (readOnly grant): SELECT ok; UPDATE with autocommit -> allowed (1 row); UPDATE inside an explicit transaction -> blocked 25006; PARTIAL: read-only grant is not enforced for autocommit statements (pgjdbc setReadOnly(true) with the default readOnlyMode=transaction only marks explicit BEGINs read only) |
-| 10 Proxy path (PostgreSQL) | control plane builds a postgres listener routing sales to the embedded database | PASS | proxy config: listener postgres-main engine POSTGRES port 5432 (fixed per engine by the control plane), route sales -> 127.0.0.1:37457/sales, 2 listeners in total ([ORACLE:1521, POSTGRES:5432]) |
-| 10 Proxy path (PostgreSQL) | proxied pgjdbc connection is attributed to orders service and correlates with client port | PARTIAL | PARTIAL: proxy ran in mode 'static-fallback' (proxy in control-plane mode never became healthy: WARN  [main] o.d.p.c.ControlPlaneConfigSource - cannot fetch proxy configuration (startup): cannot parse control plane response for /api/v1/internal/proxy/config?proxyId=it-proxy as ProxyConfigDocument: Should never call `set()` on setterless property ('programNames') (through reference chain: org.dbplatform.proxy.config.ProxyConfigDocument["applications"]->java.util.ArrayList[0]->org.dbplatform.proxy.config.ApplicationConfig["identityRules"]->org.dbplatform.proxy.config.IdentityRules["programNames"]) -> restarted in static mode), so GET /connections/live and /components were not checked; proxy-side attribution and client_port correlation verified |
-| 10 Proxy path (PostgreSQL) | unknown logical database is refused with 3D000 and quota is enforced | PASS | proxy health: status=UP listeners=[POSTGRES:38259] |
+| 10 Proxy path (PostgreSQL) | control plane builds a postgres listener routing sales to the embedded database | PASS | re-run 2026-10-06: proxy config: listener postgres-main engine POSTGRES port 5432 (fixed per engine by the control plane), route sales -> 127.0.0.1:43365/sales, 2 listeners in total ([ORACLE:1521, POSTGRES:5432]) |
+| 10 Proxy path (PostgreSQL) | proxied pgjdbc connection is attributed to orders service and correlates with client port | PASS | re-run 2026-10-06 (D3 fixed): the proxy started in mode control-plane (listeners ORACLE:1521 and POSTGRES:5432, config version applied); GET /connections/live has the PROXY row attributed to orders-service (team sales-platform, datasource sales, dbUser sales_app), GET /components lists it-proxy as PROXY, healthy; collector runtime sample attributed the backend session to orders-service (source COLLECTOR, PROXY_CORRELATION on client_port 38454); pg_stat_activity.client_port == proxyLocalPort in proxy /connections and in GET /connections/live (SERVICE_ALIAS); application_name seen by PostgreSQL: orders-service |
+| 10 Proxy path (PostgreSQL) | unknown logical database is refused with 3D000 and quota is enforced | PASS | re-run 2026-10-06: proxy health: status=UP listeners=[ORACLE:1521, POSTGRES:5432]; in control-plane mode the listener has a default route (contract section 10), so the unknown logical database 'nosuchdb' is passed to the default backend and rejected by PostgreSQL itself (3D000) - the proxy refuses nothing and the dbp_proxy_connections_refused_total counter only exists in static mode (static-mode run 3: counter present) |
+
+### 2a. Re-validation after the control-plane fixes (2026-10-06)
+
+Control plane built with `mvn -q -pl dbp-control-plane package` (run twice: `Tests run: 39, Failures: 0, Errors: 0, Skipped: 0`
+both times; 29 tests before, 10 added for D1, D2, D3, D5 and the `SqlRefs` cleanup), jar md5 `7660bc99…`, passed to the
+integration module with `-Ddbp.it.controlPlaneJar`. Scenario classes were run one by one (`-Dit.test=`), proxy jar and
+gateway jar unchanged from section 1, port 5432 free on the machine:
+
+| Run | Tests | Result |
+|-----|-------|--------|
+| `S03DriverIT` + `S06TelemetryIT` in one JVM (S06's query, summary and impact tests need the gateway telemetry that S03 produces; `S06TelemetryIT` alone fails those three tests for lack of traffic, which is not a defect) | 13 + 7 = 20 | 20 PASS, 0 PARTIAL |
+| `S08RoutingSwitchIT` | 3 | 3 PASS, 0 PARTIAL |
+| `S10ProxyIT` (proxy in control-plane mode) | 3 | 3 PASS, 0 PARTIAL |
+
+Rows that were PARTIAL in run 3 and are PASS now: S06 dictionary crawl (D1), S08 second engine (D5), S10 proxied connection (D3).
+S06 gained a test (runtime sampler with `currentSchema=sales`, D2). The `GRANT SELECT ON ALL TABLES IN SCHEMA sales TO dbp_collector`
+workaround and its PARTIAL marker are gone from S06; S08 now asserts that the control plane models H2 instead of asserting
+the rejection; S10 no longer needs the static fallback (it is kept as a fallback for hosts where 5432 is busy) and its
+refused-counter assertion is mode aware. Two assertions that only held after S03 (`customer` count `> 200`, in S08 and S10) became `>= 200` so the
+scenarios can run alone. Not re-run: S01, S02, S04, S05, S07, S09 (so the D4 read-only row is unchanged); the S03 error-semantics
+test (D6) happened to pass in the S03 re-run (the gateway was not touched by this work and D6 is not re-assessed here).
 
 ### Scenario summary
 
@@ -93,20 +120,23 @@ Final run (run 3, 2026-10-05 21:35 UTC): `Tests run: 41, Failures: 0, Errors: 0,
 | 3 | Driver → gateway → PostgreSQL | PASS (1 test PARTIAL: error semantics, D6) | `SELECT 1` with `?apiKey=` and with user/password, prepared statements with parameters and `FETCH` paging, `RETURNING` and `getGeneratedKeys`, rollback/commit/savepoint, 100-row batch, `{call order_pkg_place_order(?,?,?,?)}` **and** plain `CALL …` as a prepared statement (both work), `{? = call get_customer_tier(?)}`, `REF_CURSOR` OUT parameter iterated inside a transaction, `DatabaseMetaData.getTables/getColumns/getPrimaryKeys`, multi-statement `execute` + `getMoreResults`, `42601 → SQLSyntaxErrorException`, `23505 → SQLIntegrityConstraintViolationException`, `25P02` inside an aborted transaction, `isValid`/`close`/`08003` |
 | 4 | HikariCP + driver | PASS | 10 Hikari connections, 200 borrows from 10 threads, zero errors, zero leaks; `pg_stat_activity` never showed more than **4** `sales_app` backends (= `poolPolicy.maxConnections`), gateway pool `max=4`, `/stats/pools` matches; pool exhaustion surfaces as non-fatal `08001` after `connectionTimeoutMs` and the session recovers |
 | 5 | Reporting-batch load | PASS | 20 logical connections on virtual threads × 50 statements (the seven `Workload` SELECTs + UPDATE batches in transactions): 1000 statements, 0 errors, physical max **4**, ≈ 900 statements/s end to end on the shared 4-core box; `/stats/pools` showed `logicalSessions=20 total=4 max=4` |
-| 6 | Telemetry round trip | PARTIAL | `GET /stats/queries/top` has the normalised statements (literals replaced by `?`) with their tables and the `CALL`; `GET /tables?schema=sales` lists the schema; the application summary shows READS on `customer`/`orders` and CALLS on `order_pkg_place_order`; after a dictionary crawl the routines (PROCEDURE/FUNCTION/TRIGGER with `triggerTableId`), routine→table dependencies and the view kind are catalogued; a `CALL` after the crawl yields `orders.summary.consumers[orders-service].viaRoutine = order_pkg_place_order` (also on `payment`, `order_item` and, through the trigger, `audit_log`); `GET /impact/table/{orders}` lists direct and indirect consumers, the trigger, the dependent view and a risk score; `GET /graph?root=application:…&depth=2` has TABLE nodes and READS/CALLS edges. **PARTIAL** because the crawl only works after a grant the shipped demo does not give the collector role (defect D1) |
+| 6 | Telemetry round trip | PASS (re-run 2026-10-06) | `GET /stats/queries/top` has the normalised statements (literals replaced by `?`) with their tables and the `CALL`; `GET /tables?schema=sales` lists the schema; the application summary shows READS on `customer`/`orders` and CALLS on `order_pkg_place_order`; after a dictionary crawl the routines (PROCEDURE/FUNCTION/TRIGGER with `triggerTableId`), routine→table dependencies and the view kind are catalogued; a `CALL` after the crawl yields `orders.summary.consumers[orders-service].viaRoutine = order_pkg_place_order` (also on `payment`, `order_item` and, through the trigger, `audit_log`); `GET /impact/table/{orders}` lists direct and indirect consumers, the trigger, the dependent view and a risk score; `GET /graph?root=application:…&depth=2` has TABLE nodes and READS/CALLS edges. Re-run after the D1 and D2 fixes: the crawl catalogues all 8 sales tables (the view as `VIEW`) with the shipped `pg_monitor` + `SELECT ON audit_log` grants, no `GRANT` workaround, and the runtime sampler sets `lastRuntimeRun` although the database sets `currentSchema=sales` |
 | 7 | Credential rotation | PASS | `POST /credentials/{id}/rotate` bumps the version; within ≈ 1 s the gateway created the `@v2` pool, drained and closed the `@v1` pool, `/stats/pools` reports the new `credentialVersion`; 137 statements and 14 new connections during the rotation, 0 errors |
-| 8 | Routing rule, switch, second engine | PARTIAL | A routing rule sends `reporting-batch` to `sales-alt` while `orders-service` stays on `sales` (verified with `current_database()` through the driver); `POST /datasources/{id}/switch` moves new connections within the 1 s config poll, a pinned transaction keeps its database until COMMIT, two `MigrationEvent`s recorded; H2 `MODE=Oracle` reached through a second gateway in static mode (`getDatabaseProductName() = H2`, `SYSDATE`/`DUAL`/`ROWNUM`). **PARTIAL** because the control plane cannot model H2 (defect D5), so the second engine could not be used in the control-plane routing switch |
+| 8 | Routing rule, switch, second engine | PASS (re-run 2026-10-06) | A routing rule sends `reporting-batch` to `sales-alt` while `orders-service` stays on `sales` (verified with `current_database()` through the driver); `POST /datasources/{id}/switch` moves new connections within the 1 s config poll, a pinned transaction keeps its database until COMMIT, two `MigrationEvent`s recorded; H2 `MODE=Oracle` reached through a second gateway in static mode (`getDatabaseProductName() = H2`, `SYSDATE`/`DUAL`/`ROWNUM`). Re-run after the D5 fix: the control plane models H2 (`POST /databases` engine `H2` -> 201, `/internal/resolve` -> `jdbc:h2:tcp://host:port/mem:salesh2`, no proxy listener/route); the routing switch itself is still demonstrated with the second PostgreSQL database |
 | 9 | Access control | PARTIAL | No grant → `08004` "not authorised", wrong/missing key → `08004`, unknown datasource → `08004`, revoked key rejected for new connections within milliseconds (config-version bump invalidates the auth cache; already-open sessions keep working); **read-only grant does not block an UPDATE** (defect D4) |
-| 10 | Proxy path | PARTIAL | `GET /internal/proxy/config` builds a POSTGRES listener on 5432 routing `sales` to the embedded server with the application identity rules and quotas (verified). The proxy itself **cannot apply that document** (defect D3, both builds), so the test restarted it in static YAML mode: pgjdbc → proxy → PostgreSQL with `sales.orders-service` works, the proxy attributes the connection by service alias (`SERVICE_ALIAS`), rewrites the database name, `pg_stat_activity.client_port` equals the proxy's `proxyLocalPort` (the Oracle-style correlation key), unknown logical database → `3D000`, `sslmode=require` refused as documented, admin `/connections` requires the service token. Not verified because of D3: `GET /connections/live` (PROXY rows), the proxy heartbeat in `/components`, collector correlation |
+| 10 | Proxy path | PASS (re-run 2026-10-06) | After the D3 fix the proxy starts in **control-plane mode** (listeners ORACLE:1521 and POSTGRES:5432 applied from `GET /internal/proxy/config`); pgjdbc → proxy → PostgreSQL with `sales.orders-service` works, the proxy attributes the connection by service alias (`SERVICE_ALIAS`), rewrites the database name, `pg_stat_activity.client_port` equals the proxy's `proxyLocalPort`; `GET /connections/live` has the `PROXY` row attributed to `orders-service`, `GET /components` lists the proxy (healthy) and the collector's runtime sample correlates the backend session (`PROXY_CORRELATION`). Unknown logical database → `3D000` (from PostgreSQL through the default route in control-plane mode), `sslmode=require` refused as documented, admin `/connections` requires the service token |
 
 ## 3. Defects found
 
 Severity: **High** = a documented capability does not work in the validated configuration; **Medium** = works
 with a gap that matters for adopters; **Low** = cosmetic or edge case. "Worked around" says whether the test
-suite contains a workaround so the rest of the chain could still be validated. No module other than
-`dbp-integration-tests` was modified.
+suite contains a workaround so the rest of the chain could still be validated. When the validation was run no module
+other than `dbp-integration-tests` was modified; D1, D2, D3, D5 and D7 were handled afterwards in `dbp-control-plane`
+(2026-10-06, the first line of each of them says what was done; the "Where / Observed / Fix" text below is the original finding).
 
-### D1 — PostgreSQL dictionary crawler only sees tables the collector role may read (High, worked around)
+### D1 — PostgreSQL dictionary crawler only sees tables the collector role may read (High, fixed)
+
+**Fixed (`dbp-control-plane/src/main/java/org/dbplatform/controlplane/collector/postgres/PostgresDictionaryCrawler.java`)** — tables, views and materialized views come from `pg_class` + `pg_namespace` (`r`/`p` = TABLE, `v` = VIEW, `m` = MATERIALIZED_VIEW) and columns from `pg_attribute` / `pg_attrdef` (`format_type`, `attnotnull`, `pg_get_expr`); `information_schema` is no longer used. Re-run S06: 8 of 8 sales tables catalogued with the shipped grants, the view as `VIEW`, no `GRANT` workaround.
 
 * **Where**: `dbp-control-plane/src/main/java/org/dbplatform/controlplane/collector/postgres/PostgresDictionaryCrawler.java`,
   the table query (`SELECT … FROM information_schema.tables WHERE table_schema IN …`, ≈ line 38) and the column
@@ -133,7 +163,9 @@ suite contains a workaround so the rest of the chain could still be validated. N
   downstream (dependencies, CALL expansion, impact, graph) then works, which is why the scenario is PARTIAL and not
   FAIL.
 
-### D2 — PostgreSQL runtime sampler fails on every run when `currentSchema` is set (High, not worked around)
+### D2 — PostgreSQL runtime sampler fails on every run when `currentSchema` is set (High, fixed)
+
+**Fixed (`dbp-control-plane/src/main/java/org/dbplatform/controlplane/collector/postgres/PostgresRuntimeSampler.java`, `.../collector/CollectorConnections.java`)** — the extension's schema is read from `pg_extension`/`pg_namespace` and `"<schema>".pg_stat_statements` is queried in its own try/catch (a failure is only a sample warning), and collector connections copy only connection-level `jdbcProperties` (`ssl*`, timeouts, `oracle.net.*`, `encrypt`, `trustServerCertificate`) plus `ApplicationName=dbp-collector`. Re-run S06: `lastRuntimeRun` set, `lastError` null with `currentSchema=sales` on the database.
 
 * **Where**: `PostgresRuntimeSampler.STATEMENTS_SQL` (`SELECT … FROM pg_stat_statements …`, unqualified) together with
   `CollectorConnections` (≈ line 33), which copies **all** `Database.jdbcProperties` onto the collector connection.
@@ -152,7 +184,9 @@ suite contains a workaround so the rest of the chain could still be validated. N
   merged. Consider not copying gateway-oriented properties (`currentSchema`, `escapeSyntaxCallMode`, `ApplicationName`)
   to collector connections at all.
 
-### D3 — Proxy cannot parse the control plane's proxy configuration (High: the proxy cannot run in control-plane mode; worked around)
+### D3 — Proxy cannot parse the control plane's proxy configuration (High: the proxy cannot run in control-plane mode; fixed)
+
+**Fixed (`dbp-control-plane/src/main/java/org/dbplatform/controlplane/api/internal/InternalResolutionController.java`)** — `proxyConfig()` now writes each application's `identityRules` once, in the public spelling only (`serviceAliases`, `programNames`, `pgApplicationNames`, `machinePatterns`, `cidrs`); `dbp-common` is unchanged. Re-run S10: the proxy starts in control-plane mode.
 
 * **Where**: `dbp-control-plane … api/internal/InternalResolutionController.proxyConfig()` emits every identity rule
   twice — the `dbp-common` spelling (`programs`, `machines`, `applicationNames`, serialised from
@@ -194,7 +228,9 @@ suite contains a workaround so the rest of the chain could still be validated. N
   independently in `StatementExecutor` by rejecting statements whose `SqlAnalyzer` operation is
   INSERT/UPDATE/DELETE/MERGE/DDL/CALL for read-only sessions (SQLState `25006`), which also covers Oracle.
 
-### D5 — The control plane cannot model an H2 database (Medium, worked around)
+### D5 — The control plane cannot model an H2 database (Medium, fixed)
+
+**Fixed (`dbp-control-plane/src/main/java/org/dbplatform/controlplane/domain/Enums.java`, `.../service/JdbcUrls.java`)** — `Engine` has `H2` (`jdbc:h2:tcp://host:port/serviceName`) and `OTHER` (full URL in `jdbcProperties.url`, `400` without it); both are skipped in the proxy configuration, mapped in `TelemetryIngestService.toEngine`, and every `switch` over the engine is exhaustive. Re-run S08: `POST /databases` engine `H2` → 201 and `/internal/resolve` returns the H2 URL.
 
 * **Where**: `dbp-control-plane … domain/Enums.java` (`Engine { ORACLE, POSTGRES, MSSQL }`), `service/JdbcUrls.of`,
   `InternalResolutionController.LISTENER_PORTS`, `TelemetryIngestService.toEngine`.
@@ -220,7 +256,9 @@ suite contains a workaround so the rest of the chain could still be validated. N
   autocommit is off, e.g. `session.noteTransactionStarted()` that sets `inTransaction = true` without counting a
   statement, so the session stays pinned on the aborted physical transaction exactly like a direct connection.
 
-### D7 — `mvn install` publishes a 1.4 KB placeholder for the control plane (Low)
+### D7 — `mvn install` publishes a 1.4 KB placeholder for the control plane (Low, not reproducible; hardened)
+
+**Resolved without a functional change (`dbp-control-plane/pom.xml`)** — the 1 479-byte jar in `~/.m2` (and `target/dbp-control-plane-0.1.0-SNAPSHOT.jar`) is dated 2026-10-05 17:35, from an install of the module when it was still an empty skeleton, and was never overwritten. The build as it is already replaces the main artifact with the repackaged executable (log: `Replacing main artifact …/target/dbp-control-plane.jar with repackaged archive`; the thin jar stays as `dbp-control-plane.jar.original`), so a fresh `mvn install` publishes the runnable jar; the pom now states `attach=true` explicitly with an explanation, `target/dbp-control-plane.jar` still contains `BOOT-INF/classes/static/index.html`. `mvn install` itself was not run in this pass (the stale `~/.m2` file is therefore still there until someone installs).
 
 * `~/.m2/repository/org/dbplatform/dbp-control-plane/0.1.0-SNAPSHOT/dbp-control-plane-0.1.0-SNAPSHOT.jar` is 1 479
   bytes; the runnable artifact is `target/dbp-control-plane.jar` (custom `finalName`), which the install plugin does
@@ -250,8 +288,8 @@ suite contains a workaround so the rest of the chain could still be validated. N
 
 ## 4. Deviations from the contracts observed
 
-* `GET /internal/proxy/config` identity rules carry both spellings of each field (`programs` + `programNames`, …);
-  the contract (`docs/control-plane-api.md` §10) shows the public spelling only. Cause of D3.
+* `GET /internal/proxy/config` identity rules carried both spellings of each field (`programs` + `programNames`, …);
+  the contract (`docs/control-plane-api.md` §10) shows the public spelling only. Cause of D3, fixed on 2026-10-06 (public spelling only).
 * `GET /internal/resolve/datasource` `poolPolicy` carries `maxSize` and `maxConnections` (same value) and
   `validationTimeoutMs`; the contract lists `maxConnections` only. Harmless.
 * `GET /applications/{id}/summary.calls` contains the DECLARED Oracle routine `ORDER_PKG.PLACE_ORDER` next to the
